@@ -1,6 +1,7 @@
 use std::iter::{FusedIterator, once};
 use std::sync::Arc;
 
+use itertools::Itertools;
 use ruff_db::files::File;
 use ruff_db::parsed::parsed_module;
 use ruff_index::{IndexSlice, IndexVec};
@@ -13,6 +14,7 @@ use salsa::plumbing::AsId;
 use smallvec::SmallVec;
 use ty_module_resolver::ModuleName;
 
+use crate::node_key::NodeKey;
 use crate::semantic_index::place::ScopedPlaceId;
 
 use crate::Db;
@@ -567,6 +569,15 @@ impl<'db> SemanticIndex<'db> {
             definitions.len()
         );
         definitions[0]
+    }
+
+    pub(crate) fn try_definition(&self, definition_key: NodeKey) -> Option<Definition<'db>> {
+        self.definitions_by_node
+            .get(&DefinitionNodeKey(definition_key))?
+            .iter()
+            .copied()
+            .exactly_one()
+            .ok()
     }
 
     /// Returns the [`Expression`] ingredient for an expression node.
