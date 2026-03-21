@@ -9,7 +9,7 @@ use crate::walk::{ProjectFilesFilter, ProjectFilesWalker};
 pub use db::tests::TestDb;
 pub use db::{ChangeResult, CheckMode, Db, ProjectDatabase, SalsaMemoryDump};
 use files::{Index, Indexed, IndexedFiles};
-pub use fixes::suppress_all_diagnostics;
+pub use fixes::{fix_all_diagnostics, suppress_all_diagnostics};
 use metadata::settings::Settings;
 pub use metadata::{ProjectMetadata, ProjectMetadataError};
 use ruff_db::diagnostic::{

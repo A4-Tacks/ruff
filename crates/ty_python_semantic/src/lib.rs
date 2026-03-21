@@ -20,7 +20,8 @@ pub use semantic_model::{
     SemanticModel,
 };
 pub use suppression::{
-    UNUSED_IGNORE_COMMENT, is_unused_ignore_comment_lint, suppress_all, suppress_single,
+    SuppressFix, UNUSED_IGNORE_COMMENT, is_unused_ignore_comment_lint, suppress_all,
+    suppress_single,
 };
 use ty_module_resolver::ModuleGlobSet;
 pub use ty_site_packages::{
