@@ -611,10 +611,9 @@ mod tests {
     use ty_python_semantic::lint::Level;
 
     use crate::db::tests::TestDb;
-    use crate::fixes::{FixAllResults, FixMode};
     use crate::metadata::options::Rules;
     use crate::metadata::value::RangedValue;
-    use crate::{Db, ProjectMetadata, fix_all_diagnostics, suppress_all_diagnostics};
+    use crate::{Db, ProjectMetadata, suppress_all_diagnostics};
 
     #[test]
     fn simple_suppression() {
@@ -856,16 +855,6 @@ class B(A):
 
     #[track_caller]
     fn suppress_all_in(source: &str) -> String {
-        apply_all_in(source, FixMode::Suppress)
-    }
-
-    #[track_caller]
-    fn fix_all_in(source: &str) -> String {
-        apply_all_in(source, FixMode::ApplyFixes)
-    }
-
-    #[track_caller]
-    fn apply_all_in(source: &str, fix_mode: FixMode) -> String {
         use std::fmt::Write as _;
 
         let mut metadata = ProjectMetadata::new(Name::new_static("test"), SystemPathBuf::from("."));
@@ -891,15 +880,9 @@ class B(A):
         let diagnostics = db.project().check_file(&db, file);
         let total_diagnostics = diagnostics.len();
         let cancellation_token_source = CancellationTokenSource::new();
-        let fixes = match fix_mode {
-            FixMode::Suppress => {
-                suppress_all_diagnostics(&mut db, diagnostics, &cancellation_token_source.token())
-            }
-            FixMode::ApplyFixes => {
-                fix_all_diagnostics(&mut db, diagnostics, &cancellation_token_source.token())
-            }
-        }
-        .expect("operation never gets cancelled");
+        let fixes =
+            suppress_all_diagnostics(&mut db, diagnostics, &cancellation_token_source.token())
+                .expect("operation never gets cancelled");
 
         assert_eq!(fixes.count, total_diagnostics - fixes.diagnostics.len());
 
@@ -916,8 +899,8 @@ class B(A):
 
         writeln!(
             output,
-            "{}\n\n## Fixed source\n\n```py\n{}\n```\n",
-            summary_line(&fixes, fix_mode),
+            "Added {} suppressions\n\n## Fixed source\n\n```py\n{}\n```\n",
+            fixes.count,
             fixed.as_str()
         )
         .unwrap();
@@ -957,13 +940,6 @@ class B(A):
         }
 
         output
-    }
-
-    fn summary_line(results: &FixAllResults, fix_mode: FixMode) -> String {
-        match fix_mode {
-            FixMode::Suppress => format!("Added {} suppressions", results.count),
-            FixMode::ApplyFixes => format!("Applied {} fixes", results.count),
-        }
     }
 
     fn diff_diagnostics<'a>(before: &'a [Diagnostic], after: &'a [Diagnostic]) -> Vec<Diagnostic> {
