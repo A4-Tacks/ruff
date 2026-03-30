@@ -1656,14 +1656,18 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         debug_assert_eq!(existing_definition, None);
     }
 
-    fn declare_lambda_parameters(&mut self, parameters: &'ast ast::Parameters) {
+    fn declare_lambda_parameters(
+        &mut self,
+        parameters: &'ast ast::Parameters,
+        lambda: &'ast ast::ExprLambda,
+    ) {
         let mut index = 0;
         for parameter in &parameters.posonlyargs {
-            self.declare_lambda_parameter(index, parameter);
+            self.declare_lambda_parameter(index, parameter, lambda);
             index += 1;
         }
         for parameter in &parameters.args {
-            self.declare_lambda_parameter(index, parameter);
+            self.declare_lambda_parameter(index, parameter, lambda);
             index += 1;
         }
         if let Some(vararg) = parameters.vararg.as_ref() {
@@ -1675,13 +1679,14 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 symbol.into(),
                 LambdaParameterDefinitionNodeRef {
                     index,
+                    lambda,
                     parameter: ParameterDefinitionNodeRef::VariadicPositionalParameter(vararg),
                 },
             );
             index += 1;
         }
         for parameter in &parameters.kwonlyargs {
-            self.declare_lambda_parameter(index, parameter);
+            self.declare_lambda_parameter(index, parameter, lambda);
             index += 1;
         }
         if let Some(kwarg) = parameters.kwarg.as_ref() {
@@ -1693,6 +1698,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 symbol.into(),
                 LambdaParameterDefinitionNodeRef {
                     index,
+                    lambda,
                     parameter: ParameterDefinitionNodeRef::VariadicKeywordParameter(kwarg),
                 },
             );
@@ -1703,6 +1709,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         &mut self,
         index: usize,
         parameter: &'ast ast::ParameterWithDefault,
+        lambda: &'ast ast::ExprLambda,
     ) {
         let symbol = self.add_symbol(parameter.name().id().clone());
 
@@ -1710,6 +1717,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             symbol.into(),
             LambdaParameterDefinitionNodeRef {
                 index,
+                lambda,
                 parameter: ParameterDefinitionNodeRef::Parameter(parameter),
             },
         );
@@ -3222,7 +3230,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 
                 // Add symbols and definitions for the parameters to the lambda scope.
                 if let Some(parameters) = lambda.parameters.as_ref() {
-                    self.declare_lambda_parameters(parameters);
+                    self.declare_lambda_parameters(parameters, lambda);
                 }
 
                 self.visit_expr(lambda.body.as_ref());

@@ -27,7 +27,7 @@ use crate::{
             },
             function_known_decorators, nearest_enclosing_function,
         },
-        infer_definition_types, infer_scope_types, todo_type,
+        infer_complete_scope_types, infer_definition_types, infer_scope_types, todo_type,
     },
 };
 
@@ -894,8 +894,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     /// in the lambda body scope.
     pub(super) fn infer_lambda_parameter_definition(
         &mut self,
-        _index: usize,
+        index: usize,
         parameter_with_default: &'ast ast::ParameterWithDefault,
+        lambda: &'ast ast::ExprLambda,
         definition: Definition<'db>,
     ) {
         let ast::ParameterWithDefault {
@@ -905,12 +906,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             node_index: _,
         } = parameter_with_default;
 
-        let db = self.db();
-
         let default_expr = default.as_ref();
-        let ty = if let Some(default_expr) = default_expr {
+        let ty = if let Some(parameter_type) = self.annotated_lambda_parameter_type(index, lambda) {
+            parameter_type
+        } else if let Some(default_expr) = default_expr {
             let default_ty = self.file_expression_type(default_expr);
-            UnionType::from_two_elements(db, Type::unknown(), default_ty)
+            UnionType::from_two_elements(self.db(), Type::unknown(), default_ty)
         } else {
             Type::unknown()
         };
@@ -923,31 +924,56 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     /// in a lambda expression.
     pub(super) fn infer_variadic_positional_lambda_parameter_definition(
         &mut self,
-        _index: usize,
+        index: usize,
         parameter: &'ast ast::Parameter,
+        lambda: &'ast ast::ExprLambda,
         definition: Definition<'db>,
     ) {
-        let db = self.db();
-
-        let inferred_ty = Type::homogeneous_tuple(db, Type::unknown());
+        // Note that this currently always returns `None` because we do not support `Unpack`
+        // annotations for callable types.
+        let ty = if let Some(parameter_type) = self.annotated_lambda_parameter_type(index, lambda) {
+            parameter_type
+        } else {
+            Type::homogeneous_tuple(self.db(), Type::unknown())
+        };
         self.add_binding(parameter.into(), definition)
-            .insert(self, inferred_ty);
+            .insert(self, ty);
     }
 
     /// Set initial declared/inferred types for a `**kwargs` keyword-variadic parameter
     /// in a lambda expression.
     pub(super) fn infer_variadic_keyword_lambda_parameter_definition(
         &mut self,
-        _index: usize,
         parameter: &'ast ast::Parameter,
         definition: Definition<'db>,
     ) {
-        let db = self.db();
-
-        let inferred_ty = KnownClass::Dict
-            .to_specialized_instance(db, &[KnownClass::Str.to_instance(db), Type::unknown()]);
+        let inferred_ty = KnownClass::Dict.to_specialized_instance(
+            self.db(),
+            &[KnownClass::Str.to_instance(self.db()), Type::unknown()],
+        );
 
         self.add_binding(parameter.into(), definition)
             .insert(self, inferred_ty);
+    }
+
+    /// Returns the annotated type of the lambda parameter at the given index in the provided
+    /// lambda expression, based on a `Callable` type annotation, if present.
+    fn annotated_lambda_parameter_type(
+        &mut self,
+        index: usize,
+        lambda: &'ast ast::ExprLambda,
+    ) -> Option<Type<'db>> {
+        let scope_inference = infer_complete_scope_types(self.db(), self.scope());
+        let callable = scope_inference.expression_type(lambda).as_callable()?;
+        let [signature] = callable.signatures(self.db()).overloads.as_slice() else {
+            panic!("lambda callable types cannot be overloaded");
+        };
+
+        let parameter_type = signature.parameters().as_slice()[index].annotated_type();
+        if parameter_type.is_unknown() || parameter_type.has_unspecialized_type_var(self.db()) {
+            None
+        } else {
+            Some(parameter_type)
+        }
     }
 }

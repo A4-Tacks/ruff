@@ -392,13 +392,13 @@ impl<'ast, 'db> From<ComprehensionDefinitionNodeRef<'ast, 'db>> for DefinitionNo
     }
 }
 
-impl<'ast, 'db> From<ParameterDefinitionNodeRef<'ast>> for DefinitionNodeRef<'ast, 'db> {
+impl<'ast> From<ParameterDefinitionNodeRef<'ast>> for DefinitionNodeRef<'ast, '_> {
     fn from(node: ParameterDefinitionNodeRef<'ast>) -> Self {
         Self::Parameter(node)
     }
 }
 
-impl<'ast, 'db> From<LambdaParameterDefinitionNodeRef<'ast>> for DefinitionNodeRef<'ast, 'db> {
+impl<'ast> From<LambdaParameterDefinitionNodeRef<'ast>> for DefinitionNodeRef<'ast, '_> {
     fn from(node: LambdaParameterDefinitionNodeRef<'ast>) -> Self {
         Self::LambdaParameter(node)
     }
@@ -546,8 +546,9 @@ impl ParameterDefinitionNodeRef<'_> {
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct LambdaParameterDefinitionNodeRef<'ast> {
-    index: usize,
-    parameter: ParameterDefinitionNodeRef<'ast>,
+    pub(crate) index: usize,
+    pub(crate) parameter: ParameterDefinitionNodeRef<'ast>,
+    pub(crate) lambda: &'ast ast::ExprLambda,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -677,9 +678,11 @@ impl<'db> DefinitionNodeRef<'_, 'db> {
             DefinitionNodeRef::LambdaParameter(LambdaParameterDefinitionNodeRef {
                 index,
                 parameter,
+                lambda,
             }) => DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
                 index,
                 parameter: parameter.into_owned(parsed),
+                lambda: AstNodeRef::new(parsed, lambda),
             }),
             DefinitionNodeRef::WithItem(WithItemDefinitionNodeRef {
                 unpack,
@@ -1234,6 +1237,7 @@ impl ParameterDefinitionNodeKind {
 #[derive(Clone, Debug, get_size2::GetSize)]
 pub struct LambdaParameterDefinitionNodeKind {
     pub(crate) index: usize,
+    pub(crate) lambda: AstNodeRef<ast::ExprLambda>,
     pub(crate) parameter: ParameterDefinitionNodeKind,
 }
 

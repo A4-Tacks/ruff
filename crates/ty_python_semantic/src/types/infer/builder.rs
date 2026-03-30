@@ -843,31 +843,34 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
             DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
                 index,
+                lambda,
                 parameter: ParameterDefinitionNodeKind::VariadicPositionalParameter(parameter),
             }) => {
                 self.infer_variadic_positional_lambda_parameter_definition(
                     *index,
                     parameter.node(self.module()),
+                    lambda.node(self.module()),
                     definition,
                 );
             }
             DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
-                index,
                 parameter: ParameterDefinitionNodeKind::VariadicKeywordParameter(parameter),
+                ..
             }) => {
                 self.infer_variadic_keyword_lambda_parameter_definition(
-                    *index,
                     parameter.node(self.module()),
                     definition,
                 );
             }
             DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
                 index,
+                lambda,
                 parameter: ParameterDefinitionNodeKind::Parameter(parameter_with_default),
             }) => {
                 self.infer_lambda_parameter_definition(
                     *index,
                     parameter_with_default.node(self.module()),
+                    lambda.node(self.module()),
                     definition,
                 );
             }

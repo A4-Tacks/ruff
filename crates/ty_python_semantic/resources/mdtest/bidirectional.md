@@ -485,9 +485,8 @@ reveal_type(f2)  # revealed: (x: int) -> Bar
 f3: Callable[[int], Bar] = lambda x: {}
 reveal_type(f3)  # revealed: (int, /) -> Bar
 
-# TODO: This should reveal `str`.
-f4: Callable[[str], str] = lambda x: reveal_type(x)  # revealed: Unknown
-reveal_type(f4)  # revealed: (x: str) -> Unknown
+f4: Callable[[str], str] = lambda x: reveal_type(x)  # revealed: str
+reveal_type(f4)  # revealed: (x: str) -> str
 
 # TODO: This should not error once we support `Unpack`.
 # error: [invalid-assignment]
@@ -505,15 +504,27 @@ reveal_type(f7)  # revealed: (int, /) -> None
 # TODO: This should reveal `(*args: int, *, x=1) -> None` once we support `Unpack`.
 f8: Callable[[*tuple[int, ...], int], None] = lambda *args, x=1: None
 reveal_type(f8)  # revealed: (*args, *, x=1) -> None
+
+f9: Callable[[str, int, str], tuple[str, int, str]] = lambda x, y, z: reveal_type((x, y, z))  # revealed: tuple[str, int, str]
+reveal_type(f9)  # revealed: (x: str, y: int, z: str) -> tuple[str, int, str]
+
+# TODO: This should reveal `tuple[int, ...]` once we support `Unpack`.
+f10: Callable[[*tuple[int, ...]], tuple[int, ...]] = lambda *args: reveal_type(args)  # revealed: tuple[Unknown, ...]
+reveal_type(f10)  # revealed: (*args) -> tuple[Unknown, ...]
+
+# TODO: Better generic call inference.
+def _(x: list[int]):
+    f11 = list(map(lambda y: y + 1, x))
+    reveal_type(f11)  # revealed: list[Unknown]
 ```
 
 We do not currently account for type annotations present later in the scope:
 
 ```py
-f9 = lambda: [1]
+f12 = lambda: [1]
 # TODO: This should not error.
-_: list[int | str] = f9()  # error: [invalid-assignment]
-reveal_type(f9)  # revealed: () -> list[int]
+_: list[int | str] = f12()  # error: [invalid-assignment]
+reveal_type(f12)  # revealed: () -> list[int]
 ```
 
 ## Dunder Calls
