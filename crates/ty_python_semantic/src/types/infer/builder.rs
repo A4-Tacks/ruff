@@ -40,7 +40,8 @@ use crate::semantic_index::ast_ids::{HasScopedUseId, ScopedUseId};
 use crate::semantic_index::definition::{
     AnnotatedAssignmentDefinitionKind, AssignmentDefinitionKind, ComprehensionDefinitionKind,
     Definition, DefinitionKind, DefinitionNodeKey, DefinitionState, ExceptHandlerDefinitionKind,
-    ForStmtDefinitionKind, LoopHeaderDefinitionKind, TargetKind, WithItemDefinitionKind,
+    ForStmtDefinitionKind, LambdaParameterDefinitionNodeKind, LoopHeaderDefinitionKind,
+    ParameterDefinitionNodeKind, TargetKind, WithItemDefinitionKind,
 };
 use crate::semantic_index::expression::{Expression, ExpressionKind};
 use crate::semantic_index::narrowing_constraints::ConstraintKey;
@@ -816,20 +817,56 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             DefinitionKind::Comprehension(comprehension) => {
                 self.infer_comprehension_definition(comprehension, definition);
             }
-            DefinitionKind::VariadicPositionalParameter(parameter) => {
+            DefinitionKind::Parameter(
+                ParameterDefinitionNodeKind::VariadicPositionalParameter(parameter),
+            ) => {
                 self.infer_variadic_positional_parameter_definition(
                     parameter.node(self.module()),
                     definition,
                 );
             }
-            DefinitionKind::VariadicKeywordParameter(parameter) => {
+            DefinitionKind::Parameter(ParameterDefinitionNodeKind::VariadicKeywordParameter(
+                parameter,
+            )) => {
                 self.infer_variadic_keyword_parameter_definition(
                     parameter.node(self.module()),
                     definition,
                 );
             }
-            DefinitionKind::Parameter(parameter_with_default) => {
+            DefinitionKind::Parameter(ParameterDefinitionNodeKind::Parameter(
+                parameter_with_default,
+            )) => {
                 self.infer_parameter_definition(
+                    parameter_with_default.node(self.module()),
+                    definition,
+                );
+            }
+            DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
+                index,
+                parameter: ParameterDefinitionNodeKind::VariadicPositionalParameter(parameter),
+            }) => {
+                self.infer_variadic_positional_lambda_parameter_definition(
+                    *index,
+                    parameter.node(self.module()),
+                    definition,
+                );
+            }
+            DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
+                index,
+                parameter: ParameterDefinitionNodeKind::VariadicKeywordParameter(parameter),
+            }) => {
+                self.infer_variadic_keyword_lambda_parameter_definition(
+                    *index,
+                    parameter.node(self.module()),
+                    definition,
+                );
+            }
+            DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
+                index,
+                parameter: ParameterDefinitionNodeKind::Parameter(parameter_with_default),
+            }) => {
+                self.infer_lambda_parameter_definition(
+                    *index,
                     parameter_with_default.node(self.module()),
                     definition,
                 );

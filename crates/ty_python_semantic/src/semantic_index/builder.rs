@@ -28,8 +28,9 @@ use crate::semantic_index::definition::{
     ComprehensionDefinitionNodeRef, Definition, DefinitionCategory, DefinitionNodeKey,
     DefinitionNodeRef, Definitions, DictKeyAssignmentNodeRef, ExceptHandlerDefinitionNodeRef,
     ForStmtDefinitionNodeRef, ImportDefinitionNodeRef, ImportFromDefinitionNodeRef,
-    ImportFromSubmoduleDefinitionNodeRef, LoopHeaderDefinitionNodeRef, LoopStmtRef,
-    MatchPatternDefinitionNodeRef, StarImportDefinitionNodeRef, WithItemDefinitionNodeRef,
+    ImportFromSubmoduleDefinitionNodeRef, LambdaParameterDefinitionNodeRef,
+    LoopHeaderDefinitionNodeRef, LoopStmtRef, MatchPatternDefinitionNodeRef,
+    ParameterDefinitionNodeRef, StarImportDefinitionNodeRef, WithItemDefinitionNodeRef,
 };
 use crate::semantic_index::expression::{Expression, ExpressionKind};
 use crate::semantic_index::member::MemberExprBuilder;
@@ -1618,7 +1619,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 .mark_parameter();
             self.add_definition(
                 symbol.into(),
-                DefinitionNodeRef::VariadicPositionalParameter(vararg),
+                ParameterDefinitionNodeRef::VariadicPositionalParameter(vararg),
             );
         }
         if let Some(kwarg) = parameters.kwarg.as_ref() {
@@ -1628,7 +1629,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 .mark_parameter();
             self.add_definition(
                 symbol.into(),
-                DefinitionNodeRef::VariadicKeywordParameter(kwarg),
+                ParameterDefinitionNodeRef::VariadicKeywordParameter(kwarg),
             );
         }
     }
@@ -1636,7 +1637,82 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
     fn declare_parameter(&mut self, parameter: &'ast ast::ParameterWithDefault) {
         let symbol = self.add_symbol(parameter.name().id().clone());
 
-        let definition = self.add_definition(symbol.into(), parameter);
+        let definition = self.add_definition(
+            symbol.into(),
+            ParameterDefinitionNodeRef::Parameter(parameter),
+        );
+
+        self.current_place_table_mut()
+            .symbol_mut(symbol)
+            .mark_parameter();
+
+        // Insert a mapping from the inner Parameter node to the same definition. This
+        // ensures that calling `HasType::inferred_type` on the inner parameter returns
+        // a valid type (and doesn't panic)
+        let existing_definition = self.definitions_by_node.insert(
+            (&parameter.parameter).into(),
+            Definitions::single(definition),
+        );
+        debug_assert_eq!(existing_definition, None);
+    }
+
+    fn declare_lambda_parameters(&mut self, parameters: &'ast ast::Parameters) {
+        let mut index = 0;
+        for parameter in &parameters.posonlyargs {
+            self.declare_lambda_parameter(index, parameter);
+            index += 1;
+        }
+        for parameter in &parameters.args {
+            self.declare_lambda_parameter(index, parameter);
+            index += 1;
+        }
+        if let Some(vararg) = parameters.vararg.as_ref() {
+            let symbol = self.add_symbol(vararg.name.id().clone());
+            self.current_place_table_mut()
+                .symbol_mut(symbol)
+                .mark_parameter();
+            self.add_definition(
+                symbol.into(),
+                LambdaParameterDefinitionNodeRef {
+                    index,
+                    parameter: ParameterDefinitionNodeRef::VariadicPositionalParameter(vararg),
+                },
+            );
+            index += 1;
+        }
+        for parameter in &parameters.kwonlyargs {
+            self.declare_lambda_parameter(index, parameter);
+            index += 1;
+        }
+        if let Some(kwarg) = parameters.kwarg.as_ref() {
+            let symbol = self.add_symbol(kwarg.name.id().clone());
+            self.current_place_table_mut()
+                .symbol_mut(symbol)
+                .mark_parameter();
+            self.add_definition(
+                symbol.into(),
+                LambdaParameterDefinitionNodeRef {
+                    index,
+                    parameter: ParameterDefinitionNodeRef::VariadicKeywordParameter(kwarg),
+                },
+            );
+        }
+    }
+
+    fn declare_lambda_parameter(
+        &mut self,
+        index: usize,
+        parameter: &'ast ast::ParameterWithDefault,
+    ) {
+        let symbol = self.add_symbol(parameter.name().id().clone());
+
+        let definition = self.add_definition(
+            symbol.into(),
+            LambdaParameterDefinitionNodeRef {
+                index,
+                parameter: ParameterDefinitionNodeRef::Parameter(parameter),
+            },
+        );
 
         self.current_place_table_mut()
             .symbol_mut(symbol)
@@ -3146,7 +3222,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
 
                 // Add symbols and definitions for the parameters to the lambda scope.
                 if let Some(parameters) = lambda.parameters.as_ref() {
-                    self.declare_parameters(parameters);
+                    self.declare_lambda_parameters(parameters);
                 }
 
                 self.visit_expr(lambda.body.as_ref());

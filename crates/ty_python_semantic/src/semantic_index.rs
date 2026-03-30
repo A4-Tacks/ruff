@@ -862,7 +862,9 @@ mod tests {
     use crate::Db;
     use crate::db::tests::{TestDb, TestDbBuilder};
     use crate::semantic_index::ast_ids::{HasScopedUseId, ScopedUseId};
-    use crate::semantic_index::definition::{Definition, DefinitionKind};
+    use crate::semantic_index::definition::{
+        Definition, DefinitionKind, LambdaParameterDefinitionNodeKind, ParameterDefinitionNodeKind,
+    };
     use crate::semantic_index::place::PlaceTable;
     use crate::semantic_index::scope::{FileScopeId, Scope, ScopeKind};
     use crate::semantic_index::symbol::ScopedSymbolId;
@@ -1153,14 +1155,14 @@ def f(a: str, /, b: str, c: int = 1, *args, d: int = 2, **kwargs):
             .unwrap();
         assert!(matches!(
             args_binding.kind(&db),
-            DefinitionKind::VariadicPositionalParameter(_)
+            DefinitionKind::Parameter(ParameterDefinitionNodeKind::VariadicPositionalParameter(_))
         ));
         let kwargs_binding = use_def
             .first_public_binding(function_table.symbol_id("kwargs").expect("symbol exists"))
             .unwrap();
         assert!(matches!(
             kwargs_binding.kind(&db),
-            DefinitionKind::VariadicKeywordParameter(_)
+            DefinitionKind::Parameter(ParameterDefinitionNodeKind::VariadicKeywordParameter(_))
         ));
     }
 
@@ -1183,7 +1185,7 @@ def f(a: str, /, b: str, c: int = 1, *args, d: int = 2, **kwargs):
         let lambda_table = index.place_table(lambda_scope_id);
         assert_eq!(
             names(lambda_table),
-            vec!["a", "b", "c", "d", "args", "kwargs"],
+            vec!["a", "b", "c", "args", "d", "kwargs"],
         );
 
         let use_def = index.use_def_map(lambda_scope_id);
@@ -1191,21 +1193,36 @@ def f(a: str, /, b: str, c: int = 1, *args, d: int = 2, **kwargs):
             let binding = use_def
                 .first_public_binding(lambda_table.symbol_id(name).expect("symbol exists"))
                 .unwrap();
-            assert!(matches!(binding.kind(&db), DefinitionKind::Parameter(_)));
+            assert!(matches!(
+                binding.kind(&db),
+                DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
+                    index: _,
+                    lambda: _,
+                    parameter: ParameterDefinitionNodeKind::Parameter(_)
+                })
+            ));
         }
         let args_binding = use_def
             .first_public_binding(lambda_table.symbol_id("args").expect("symbol exists"))
             .unwrap();
         assert!(matches!(
             args_binding.kind(&db),
-            DefinitionKind::VariadicPositionalParameter(_)
+            DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
+                index: 3,
+                lambda: _,
+                parameter: ParameterDefinitionNodeKind::VariadicPositionalParameter(_)
+            })
         ));
         let kwargs_binding = use_def
             .first_public_binding(lambda_table.symbol_id("kwargs").expect("symbol exists"))
             .unwrap();
         assert!(matches!(
             kwargs_binding.kind(&db),
-            DefinitionKind::VariadicKeywordParameter(_)
+            DefinitionKind::LambdaParameter(LambdaParameterDefinitionNodeKind {
+                index: 5,
+                lambda: _,
+                parameter: ParameterDefinitionNodeKind::VariadicKeywordParameter(_)
+            })
         ));
     }
 

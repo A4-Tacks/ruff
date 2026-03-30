@@ -889,4 +889,65 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .insert(self, inferred_ty);
         }
     }
+
+    /// Set initial declared type (if annotated) and inferred type for a lambda-parameter symbol,
+    /// in the lambda body scope.
+    pub(super) fn infer_lambda_parameter_definition(
+        &mut self,
+        _index: usize,
+        parameter_with_default: &'ast ast::ParameterWithDefault,
+        definition: Definition<'db>,
+    ) {
+        let ast::ParameterWithDefault {
+            parameter,
+            default,
+            range: _,
+            node_index: _,
+        } = parameter_with_default;
+
+        let db = self.db();
+
+        let default_expr = default.as_ref();
+        let ty = if let Some(default_expr) = default_expr {
+            let default_ty = self.file_expression_type(default_expr);
+            UnionType::from_two_elements(db, Type::unknown(), default_ty)
+        } else {
+            Type::unknown()
+        };
+
+        self.add_binding(parameter.into(), definition)
+            .insert(self, ty);
+    }
+
+    /// Set initial declared/inferred types for a `*args` variadic positional parameter
+    /// in a lambda expression.
+    pub(super) fn infer_variadic_positional_lambda_parameter_definition(
+        &mut self,
+        _index: usize,
+        parameter: &'ast ast::Parameter,
+        definition: Definition<'db>,
+    ) {
+        let db = self.db();
+
+        let inferred_ty = Type::homogeneous_tuple(db, Type::unknown());
+        self.add_binding(parameter.into(), definition)
+            .insert(self, inferred_ty);
+    }
+
+    /// Set initial declared/inferred types for a `**kwargs` keyword-variadic parameter
+    /// in a lambda expression.
+    pub(super) fn infer_variadic_keyword_lambda_parameter_definition(
+        &mut self,
+        _index: usize,
+        parameter: &'ast ast::Parameter,
+        definition: Definition<'db>,
+    ) {
+        let db = self.db();
+
+        let inferred_ty = KnownClass::Dict
+            .to_specialized_instance(db, &[KnownClass::Str.to_instance(db), Type::unknown()]);
+
+        self.add_binding(parameter.into(), definition)
+            .insert(self, inferred_ty);
+    }
 }
