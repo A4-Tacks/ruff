@@ -49,6 +49,7 @@ use crate::semantic_index::place::{PlaceExpr, PlaceExprRef};
 use crate::semantic_index::scope::{
     FileScopeId, NodeWithScopeKind, NodeWithScopeRef, ScopeId, ScopeKind,
 };
+use crate::semantic_index::statement::Statement;
 use crate::semantic_index::symbol::{ScopedSymbolId, Symbol};
 use crate::semantic_index::{
     ApplicableConstraints, EnclosingSnapshotResult, SemanticIndex, place_table,
@@ -89,7 +90,10 @@ use crate::types::function::{
 use crate::types::generics::{InferableTypeVars, SpecializationBuilder, bind_typevar};
 use crate::types::infer::builder::named_tuple::NamedTupleKind;
 use crate::types::infer::builder::paramspec_validation::validate_paramspec_components;
-use crate::types::infer::{nearest_enclosing_class, nearest_enclosing_function};
+use crate::types::infer::{
+    StatementInference, StatementInferenceExtra, infer_statement_types, nearest_enclosing_class,
+    nearest_enclosing_function,
+};
 use crate::types::newtype::NewType;
 use crate::types::set_theoretic::RecursivelyDefined;
 use crate::types::signatures::CallableSignature;
@@ -391,6 +395,29 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
     }
 
+    fn extend_statement(&mut self, inference: &StatementInference<'db>) {
+        #[cfg(debug_assertions)]
+        assert_eq!(self.scope, inference.scope);
+
+        self.expressions.extend(inference.expressions.iter());
+        self.declarations.extend(inference.declarations());
+
+        if !matches!(self.region, InferenceRegion::Scope(..)) {
+            self.bindings.extend(inference.bindings());
+        }
+
+        if let Some(extra) = &inference.extra {
+            self.called_functions
+                .extend(extra.called_functions.iter().copied());
+            self.extend_cycle_recovery(extra.cycle_recovery);
+            self.context.extend(&extra.diagnostics);
+            self.deferred.extend(extra.deferred.iter().copied());
+            self.string_annotations
+                .extend(extra.string_annotations.iter().copied());
+            self.qualifiers.extend(extra.qualifiers.iter());
+        }
+    }
+
     fn extend_expression(&mut self, inference: &ExpressionInference<'db>) {
         #[cfg(debug_assertions)]
         assert_eq!(self.scope, inference.scope);
@@ -606,6 +633,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     /// Infers types in the given [`InferenceRegion`].
     fn infer_region(&mut self) {
         match self.region {
+            InferenceRegion::Statement(statement) => self.infer_region_statement(statement),
             InferenceRegion::Scope(scope, tcx) => self.infer_region_scope(scope, tcx),
             InferenceRegion::Definition(definition) => self.infer_region_definition(definition),
             InferenceRegion::FunctionDecorators(definition) => {
@@ -749,6 +777,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             post_inference::final_variable::check_final_without_value(&self.context, self.index);
         }
+    }
+
+    fn infer_region_statement(&mut self, statement: Statement<'db>) {
+        self.infer_statement(statement.node_ref(self.db()).node(self.module()));
     }
 
     fn infer_region_definition(&mut self, definition: Definition<'db>) {
@@ -1432,7 +1464,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     fn infer_body(&mut self, suite: &[ast::Stmt]) {
         for statement in suite {
-            self.infer_statement(statement);
+            self.infer_maybe_standalone_statement(statement);
         }
     }
 
@@ -4937,6 +4969,19 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             None | Some(ParameterForm::Value) => self.infer_expression(ast_argument, tcx),
             Some(ParameterForm::Type) => self.infer_type_expression(ast_argument),
         }
+    }
+
+    fn infer_maybe_standalone_statement(&mut self, statement: &ast::Stmt) {
+        if let Some(standalone_statement) = self.index.try_statement(statement) {
+            self.infer_standalone_statement_impl(standalone_statement);
+        } else {
+            self.infer_statement(statement);
+        }
+    }
+
+    fn infer_standalone_statement_impl(&mut self, standalone_statement: Statement<'db>) {
+        let types = infer_statement_types(self.db(), standalone_statement);
+        self.extend_statement(types);
     }
 
     fn infer_optional_expression(
@@ -8627,6 +8672,88 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
     }
 
+    pub(super) fn finish_statement(mut self) -> StatementInference<'db> {
+        self.infer_region();
+
+        let Self {
+            context,
+            mut expressions,
+            mut qualifiers,
+            string_annotations,
+            scope,
+            bindings,
+            declarations,
+            deferred,
+            cycle_recovery,
+            undecorated_type,
+            called_functions,
+
+            // builder only state
+            expression_cache: _,
+            dataclass_field_specifiers: _,
+            all_definitely_bound: _,
+            typevar_binding_context: _,
+            inference_flags: _,
+            deferred_state: _,
+            index: _,
+            region: _,
+            return_types_and_ranges: _,
+        } = self;
+
+        let _ = scope;
+        let diagnostics = context.finish();
+
+        let extra = (!diagnostics.is_empty()
+            || !string_annotations.is_empty()
+            || cycle_recovery.is_some()
+            || undecorated_type.is_some()
+            || !deferred.is_empty()
+            || !called_functions.is_empty()
+            || !qualifiers.is_empty())
+        .then(|| {
+            qualifiers.shrink_to_fit();
+            Box::new(StatementInferenceExtra {
+                string_annotations,
+                called_functions: called_functions
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                cycle_recovery,
+                deferred: deferred.into_boxed_slice(),
+                diagnostics,
+                undecorated_type,
+                qualifiers,
+            })
+        });
+
+        if bindings.len() > 20 {
+            tracing::debug!(
+                "Inferred statement region `{:?}` contains {} bindings. Lookups by linear scan might be slow.",
+                self.region,
+                bindings.len(),
+            );
+        }
+
+        if declarations.len() > 20 {
+            tracing::debug!(
+                "Inferred statement region `{:?}` contains {} declarations. Lookups by linear scan might be slow.",
+                self.region,
+                declarations.len(),
+            );
+        }
+
+        expressions.shrink_to_fit();
+
+        StatementInference {
+            expressions,
+            #[cfg(debug_assertions)]
+            scope,
+            bindings: bindings.into_boxed_slice(),
+            declarations: declarations.into_boxed_slice(),
+            extra,
+        }
+    }
+
     pub(super) fn finish_function_decorator_inference(mut self) -> FunctionDecoratorInference<'db> {
         self.infer_region();
 
@@ -8775,7 +8902,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             scope,
             cycle_recovery,
 
-            // Ignored, because scope types are never extended into other scopes.
+            // Ignored, never leaked into other scopes
             deferred: _,
             bindings: _,
             declarations: _,

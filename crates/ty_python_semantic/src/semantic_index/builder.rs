@@ -47,6 +47,7 @@ use crate::semantic_index::scope::{
     FileScopeId, NodeWithScopeKey, NodeWithScopeKind, NodeWithScopeRef,
 };
 use crate::semantic_index::scope::{Scope, ScopeId, ScopeKind, ScopeLaziness};
+use crate::semantic_index::statement::{Statement, StatementNodeKey};
 use crate::semantic_index::symbol::{ScopedSymbolId, Symbol};
 use crate::semantic_index::use_def::{
     EnclosingSnapshotKey, FlowSnapshot, PreviousDefinitions, ScopedDefinitionId,
@@ -100,6 +101,8 @@ pub(super) struct SemanticIndexBuilder<'db, 'ast> {
     /// The assignments we're currently visiting, with
     /// the most recent visit at the end of the Vec
     current_assignments: Vec<CurrentAssignment<'ast, 'db>>,
+    /// The statement we're currently visiting.
+    current_statement: Option<(&'ast ast::Stmt, FileScopeId)>,
     /// The match case we're currently visiting.
     current_match_case: Option<CurrentMatchCase<'ast>>,
     /// The name of the first function parameter of the innermost function that we're currently visiting.
@@ -129,6 +132,8 @@ pub(super) struct SemanticIndexBuilder<'db, 'ast> {
     scopes_by_expression: ExpressionsScopeMapBuilder,
     definitions_by_node: FxHashMap<DefinitionNodeKey, Definitions<'db>>,
     expressions_by_node: FxHashMap<ExpressionNodeKey, Expression<'db>>,
+    statements_by_node: FxHashMap<StatementNodeKey, Statement<'db>>,
+    enclosing_lambda_statements: FxHashMap<ExpressionNodeKey, Statement<'db>>,
     imported_modules: FxHashSet<ModuleName>,
     seen_submodule_imports: FxHashSet<String>,
     /// Hashset of all [`FileScopeId`]s that correspond to [generator functions].
@@ -150,6 +155,7 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             module: module_ref,
             scope_stack: Vec::new(),
             current_assignments: vec![],
+            current_statement: None,
             current_match_case: None,
             current_first_parameter_name: None,
             try_node_context_stack_manager: TryNodeContextStackManager::default(),
@@ -167,6 +173,8 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             scopes_by_node: FxHashMap::default(),
             definitions_by_node: FxHashMap::default(),
             expressions_by_node: FxHashMap::default(),
+            statements_by_node: FxHashMap::default(),
+            enclosing_lambda_statements: FxHashMap::default(),
 
             seen_submodule_imports: FxHashSet::default(),
             imported_modules: FxHashSet::default(),
@@ -1475,6 +1483,22 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         expression
     }
 
+    fn add_standalone_statement(
+        &mut self,
+        statement_node: &ast::Stmt,
+        scope: FileScopeId,
+    ) -> Statement<'db> {
+        let statement = Statement::new(
+            self.db,
+            self.file,
+            scope,
+            AstNodeRef::new(self.module, statement_node),
+        );
+        self.statements_by_node
+            .insert(statement_node.into(), statement);
+        statement
+    }
+
     fn with_type_params(
         &mut self,
         with_scope: NodeWithScopeRef,
@@ -1832,6 +1856,8 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         use_def_maps.shrink_to_fit();
         ast_ids.shrink_to_fit();
         self.definitions_by_node.shrink_to_fit();
+        self.statements_by_node.shrink_to_fit();
+        self.enclosing_lambda_statements.shrink_to_fit();
 
         self.scope_ids_by_scope.shrink_to_fit();
         self.scopes_by_node.shrink_to_fit();
@@ -1843,11 +1869,13 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             scopes: self.scopes,
             definitions_by_node: self.definitions_by_node,
             expressions_by_node: self.expressions_by_node,
+            statements_by_node: self.statements_by_node,
             scope_ids_by_scope: self.scope_ids_by_scope,
             ast_ids,
             scopes_by_expression: self.scopes_by_expression.build(),
             scopes_by_node: self.scopes_by_node,
             use_def_maps,
+            enclosing_lambda_statements: self.enclosing_lambda_statements,
             imported_modules: Arc::new(self.imported_modules),
             has_future_annotations: self.has_future_annotations,
             enclosing_snapshots: self.enclosing_snapshots,
@@ -1866,10 +1894,8 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         self.source_text
             .get_or_init(|| source_text(self.db, self.file))
     }
-}
 
-impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
-    fn visit_stmt(&mut self, stmt: &'ast ast::Stmt) {
+    fn visit_stmt_impl(&mut self, stmt: &'ast ast::Stmt) {
         self.with_semantic_checker(|semantic, context| semantic.visit_stmt(stmt, context));
 
         let in_type_checking_block = self.in_type_checking_block;
@@ -3084,6 +3110,14 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
             }
         }
     }
+}
+
+impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
+    fn visit_stmt(&mut self, stmt: &'ast ast::Stmt) {
+        self.current_statement = Some((stmt, self.current_scope()));
+        self.visit_stmt_impl(stmt);
+        self.current_statement = None;
+    }
 
     fn visit_keyword(&mut self, keyword: &'ast ast::Keyword) {
         walk_keyword(self, keyword);
@@ -3215,6 +3249,15 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 }
             }
             ast::Expr::Lambda(lambda) => {
+                // The body of a lambda expression needs access to the `Callable` type
+                // context the lambda is being inferred with, and so any statement
+                // containing a lambda must be inferable as a standalone statement.
+                if let Some((stmt, scope)) = self.current_statement {
+                    let standalone_stmt = self.add_standalone_statement(stmt, scope);
+                    self.enclosing_lambda_statements
+                        .insert(lambda.into(), standalone_stmt);
+                }
+
                 if let Some(parameters) = &lambda.parameters {
                     // The default value of the parameters needs to be evaluated in the
                     // enclosing scope.

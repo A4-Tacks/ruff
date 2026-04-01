@@ -25,9 +25,9 @@ use crate::{
                 DeclaredAndInferredType, DeferredExpressionState, TypeAndRange,
                 validate_paramspec_components,
             },
-            function_known_decorators, nearest_enclosing_function,
+            function_known_decorators, infer_statement_types, nearest_enclosing_function,
         },
-        infer_complete_scope_types, infer_definition_types, infer_scope_types, todo_type,
+        infer_definition_types, infer_scope_types, todo_type,
     },
 };
 
@@ -963,8 +963,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         index: usize,
         lambda: &'ast ast::ExprLambda,
     ) -> Option<Type<'db>> {
-        let scope_inference = infer_complete_scope_types(self.db(), self.scope());
-        let callable = scope_inference.expression_type(lambda).as_callable()?;
+        let enclosing_stmt = infer_statement_types(
+            self.db(),
+            self.index.enclosing_lambda_statement(lambda.into())?,
+        );
+        let callable = enclosing_stmt.expression_type(lambda).as_callable()?;
         let [signature] = callable.signatures(self.db()).overloads.as_slice() else {
             panic!("lambda callable types cannot be overloaded");
         };

@@ -1,10 +1,16 @@
-//! We have Salsa queries for inferring types at three different granularities: scope-level,
-//! definition-level, and expression-level, plus lightweight queries for focused subregions like
-//! function decorators.
+//! We have Salsa queries for inferring types at four different granularities: scope-level,
+//! statement-level, definition-level, and expression-level, plus lightweight queries for
+//! focused subregions like function decorators.
 //!
 //! Scope-level inference is for when we are actually checking a file, and need to check types for
 //! everything in that file's scopes, or give a linter access to types of arbitrary expressions
 //! (via the [`HasType`](crate::semantic_model::HasType) trait).
+//!
+//! Statement-level inference is needed in only a few cases. Some expressions need access to
+//! type context from a parent expression, e.g., the type of lambda parameter depends on the
+//! annotated type of the lambda. Statements are the minimal unit that can be inferred without
+//! external type context, and so statement-level inference allows us to resolve type context
+//! without relying on scope-level inference cycles.
 //!
 //! Definition-level inference allows us to look up the types of places in other scopes (e.g. for
 //! imports) with the minimum inference necessary, so that if we're looking up one place from a
@@ -19,10 +25,10 @@
 //! cached by Salsa. We also need the expression-level query for inferring types in type guard
 //! expressions (e.g. the test clause of an `if` statement.)
 //!
-//! Inferring types at any of the three region granularities returns a [`ExpressionInference`],
-//! [`DefinitionInference`], or [`ScopeInference`], which hold the types for every expression
-//! within the inferred region. Some inference types also expose the type of every definition
-//! within the inferred region.
+//! Inferring types at any of the four region granularities returns a [`ExpressionInference`],
+//! [`DefinitionInference`], [`StatementInference`], or [`ScopeInference`], which hold the types for
+//! every expression within the inferred region. Some inference types also expose the type of every
+//! definition within the inferred region.
 //!
 //! Some type expressions can require deferred evaluation. This includes all type expressions in
 //! stub files, or annotation expressions in modules with `from __future__ import annotations`, or
@@ -48,6 +54,7 @@ use crate::semantic_index::ast_ids::node_key::ExpressionNodeKey;
 use crate::semantic_index::definition::Definition;
 use crate::semantic_index::expression::Expression;
 use crate::semantic_index::scope::ScopeId;
+use crate::semantic_index::statement::Statement;
 use crate::semantic_index::{SemanticIndex, semantic_index};
 use crate::types::diagnostic::TypeCheckDiagnostics;
 use crate::types::function::{FunctionDecorators, FunctionType};
@@ -388,6 +395,43 @@ fn infer_expression_type_impl<'db>(db: &'db dyn Db, input: InferExpression<'db>)
     inference.expression_type(expression.node_ref(db))
 }
 
+#[salsa::tracked(
+    returns(ref),
+    cycle_initial=statement_cycle_initial,
+    cycle_fn=|db, cycle, previous: &StatementInference<'db>, inference: StatementInference<'db>, _| {
+        inference.cycle_normalized(db, previous, cycle)
+    },
+    heap_size=ruff_memory_usage::heap_size
+)]
+pub(super) fn infer_statement_types<'db>(
+    db: &'db dyn Db,
+    statement: Statement<'db>,
+) -> StatementInference<'db> {
+    let file = statement.file(db);
+    let module = parsed_module(db, file).load(db);
+    let _span = tracing::trace_span!(
+        "infer_statement_types",
+        statement = ?statement.as_id(),
+        range = ?statement.node_ref(db).node(&module).range(),
+        ?file
+    )
+    .entered();
+
+    let index = semantic_index(db, file);
+
+    TypeInferenceBuilder::new(db, InferenceRegion::Statement(statement), index, &module)
+        .finish_statement()
+}
+
+fn statement_cycle_initial<'db>(
+    db: &'db dyn Db,
+    id: salsa::Id,
+    statement: Statement<'db>,
+) -> StatementInference<'db> {
+    let cycle_recovery = Type::divergent(id);
+    StatementInference::cycle_initial(statement.scope(db), cycle_recovery)
+}
+
 /// An `Expression` with an optional `TypeContext`.
 ///
 /// This is a Salsa supertype used as the input to `infer_expression_types` to avoid
@@ -586,6 +630,8 @@ pub(crate) fn nearest_enclosing_function<'db>(
 /// A region within which we can infer types.
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum InferenceRegion<'db> {
+    // infer types for a [`Statement`].
+    Statement(Statement<'db>),
     /// infer types for a standalone [`Expression`]
     Expression(Expression<'db>, TypeContext<'db>),
     /// infer types for a [`Definition`]
@@ -601,6 +647,7 @@ pub(crate) enum InferenceRegion<'db> {
 impl<'db> InferenceRegion<'db> {
     fn scope(self, db: &'db dyn Db) -> ScopeId<'db> {
         match self {
+            InferenceRegion::Statement(statement) => statement.scope(db),
             InferenceRegion::Expression(expression, _) => expression.scope(db),
             InferenceRegion::Definition(definition)
             | InferenceRegion::FunctionDecorators(definition)
@@ -969,6 +1016,137 @@ impl<'db> ExpressionInference<'db> {
     }
 
     fn fallback_type(&self) -> Option<Type<'db>> {
+        self.extra.as_ref().and_then(|extra| extra.cycle_recovery)
+    }
+}
+
+/// The inferred types for a statement region.
+#[derive(Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
+pub(crate) struct StatementInference<'db> {
+    /// The types of every expression in this region.
+    expressions: FxHashMap<ExpressionNodeKey, Type<'db>>,
+
+    /// The scope this region is part of.
+    #[cfg(debug_assertions)]
+    scope: ScopeId<'db>,
+
+    /// The types of every binding in this region.
+    pub(crate) bindings: Box<[(Definition<'db>, Type<'db>)]>,
+
+    /// The types and type qualifiers of every declaration in this region.
+    declarations: Box<[(Definition<'db>, TypeAndQualifiers<'db>)]>,
+
+    /// The extra data that is only present for few inference regions.
+    extra: Option<Box<StatementInferenceExtra<'db>>>,
+}
+
+#[derive(Debug, Eq, PartialEq, get_size2::GetSize, salsa::Update, Default)]
+struct StatementInferenceExtra<'db> {
+    /// String annotations found in this region
+    string_annotations: FxHashSet<ExpressionNodeKey>,
+
+    /// Functions called while inferring this statement.
+    called_functions: Box<[FunctionType<'db>]>,
+
+    /// The fallback type for missing expressions/bindings/declarations or recursive type inference.
+    cycle_recovery: Option<Type<'db>>,
+
+    /// The definitions that have some deferred parts.
+    deferred: Box<[Definition<'db>]>,
+
+    /// The diagnostics for this region.
+    diagnostics: TypeCheckDiagnostics,
+
+    /// For function definitions, the undecorated type of the function.
+    undecorated_type: Option<Type<'db>>,
+
+    /// Type qualifiers (`Required`, `NotRequired`, etc.) for annotation expressions.
+    /// Only populated for expressions that have non-empty qualifiers.
+    qualifiers: FxHashMap<ExpressionNodeKey, TypeQualifiers>,
+}
+
+impl<'db> StatementInference<'db> {
+    fn cycle_initial(scope: ScopeId<'db>, cycle_recovery: Type<'db>) -> Self {
+        let _ = scope;
+
+        Self {
+            expressions: FxHashMap::default(),
+            bindings: Box::default(),
+            declarations: Box::default(),
+            #[cfg(debug_assertions)]
+            scope,
+            extra: Some(Box::new(StatementInferenceExtra {
+                cycle_recovery: Some(cycle_recovery),
+                ..StatementInferenceExtra::default()
+            })),
+        }
+    }
+
+    fn cycle_normalized(
+        mut self,
+        db: &'db dyn Db,
+        previous_inference: &StatementInference<'db>,
+        cycle: &salsa::Cycle,
+    ) -> StatementInference<'db> {
+        for (expr, ty) in &mut self.expressions {
+            let previous_ty = previous_inference.expression_type(*expr);
+            *ty = ty.cycle_normalized(db, previous_ty, cycle);
+        }
+        for (binding, binding_ty) in &mut self.bindings {
+            if let Some((_, previous_binding)) = previous_inference
+                .bindings
+                .iter()
+                .find(|(previous_binding, _)| previous_binding == binding)
+            {
+                *binding_ty = binding_ty.cycle_normalized(db, *previous_binding, cycle);
+            } else {
+                *binding_ty = binding_ty.recursive_type_normalized(db, cycle);
+            }
+        }
+        for (declaration, declaration_ty) in &mut self.declarations {
+            if let Some((_, previous_declaration)) = previous_inference
+                .declarations
+                .iter()
+                .find(|(previous_declaration, _)| previous_declaration == declaration)
+            {
+                *declaration_ty = declaration_ty.map_type(|decl_ty| {
+                    decl_ty.cycle_normalized(db, previous_declaration.inner_type(), cycle)
+                });
+            } else {
+                *declaration_ty =
+                    declaration_ty.map_type(|decl_ty| decl_ty.recursive_type_normalized(db, cycle));
+            }
+        }
+
+        self
+    }
+
+    pub(crate) fn expression_type(&self, expression: impl Into<ExpressionNodeKey>) -> Type<'db> {
+        self.try_expression_type(expression)
+            .unwrap_or_else(Type::unknown)
+    }
+
+    pub(crate) fn try_expression_type(
+        &self,
+        expression: impl Into<ExpressionNodeKey>,
+    ) -> Option<Type<'db>> {
+        self.expressions
+            .get(&expression.into())
+            .copied()
+            .or_else(|| self.fallback_type())
+    }
+
+    fn bindings(&self) -> impl ExactSizeIterator<Item = (Definition<'db>, Type<'db>)> {
+        self.bindings.iter().copied()
+    }
+
+    fn declarations(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (Definition<'db>, TypeAndQualifiers<'db>)> {
+        self.declarations.iter().copied()
+    }
+
+    pub(crate) fn fallback_type(&self) -> Option<Type<'db>> {
         self.extra.as_ref().and_then(|extra| extra.cycle_recovery)
     }
 }
