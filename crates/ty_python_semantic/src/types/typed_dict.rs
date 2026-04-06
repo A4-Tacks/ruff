@@ -790,6 +790,7 @@ pub(super) fn validate_typed_dict_required_keys<'db, 'ast>(
     typed_dict: TypedDictType<'db>,
     provided_keys: &OrderSet<Name>,
     error_node: AnyNodeRef<'ast>,
+    emit_diagnostic: bool,
 ) -> bool {
     let db = context.db();
     let items = typed_dict.items(db);
@@ -805,12 +806,14 @@ pub(super) fn validate_typed_dict_required_keys<'db, 'ast>(
     for missing_key in missing_keys {
         has_missing_key = true;
 
-        report_missing_typed_dict_key(
-            context,
-            error_node,
-            Type::TypedDict(typed_dict),
-            missing_key.as_str(),
-        );
+        if emit_diagnostic {
+            report_missing_typed_dict_key(
+                context,
+                error_node,
+                Type::TypedDict(typed_dict),
+                missing_key.as_str(),
+            );
+        }
     }
 
     !has_missing_key
@@ -1107,8 +1110,10 @@ fn validate_extracted_typed_dict_keys<'db, 'ast>(
     nodes: TypedDictAssignmentNodes<'ast>,
     full_object_ty: Option<Type<'db>>,
     ignored_keys: &OrderSet<Name>,
-) -> OrderSet<Name> {
+    emit_diagnostic: bool,
+) -> (bool, OrderSet<Name>) {
     let mut provided_keys = OrderSet::new();
+    let mut valid = true;
 
     for (key_name, unpacked_key) in unpacked_keys {
         if ignored_keys.contains(key_name) {
@@ -1117,7 +1122,7 @@ fn validate_extracted_typed_dict_keys<'db, 'ast>(
         if unpacked_key.is_required {
             provided_keys.insert(key_name.clone());
         }
-        TypedDictKeyAssignment {
+        valid &= TypedDictKeyAssignment {
             context,
             typed_dict,
             full_object_ty,
@@ -1127,12 +1132,12 @@ fn validate_extracted_typed_dict_keys<'db, 'ast>(
             key_node: nodes.key,
             value_node: nodes.value,
             assignment_kind: TypedDictAssignmentKind::Constructor,
-            emit_diagnostic: true,
+            emit_diagnostic,
         }
         .validate();
     }
 
-    provided_keys
+    (valid, provided_keys)
 }
 
 /// Validates a mixed-constructor positional argument when its type can be viewed as a `TypedDict`.
@@ -1149,7 +1154,8 @@ fn validate_from_typed_dict_argument<'db, 'ast>(
     arg_ty: Type<'db>,
     typed_dict_node: AnyNodeRef<'ast>,
     ignored_keys: &OrderSet<Name>,
-) -> Option<OrderSet<Name>> {
+    emit_diagnostic: bool,
+) -> Option<(bool, OrderSet<Name>)> {
     let db = context.db();
     let typed_dict_items = typed_dict.items(db);
     let unpacked_keys = extract_unpacked_typed_dict_keys(db, arg_ty)?
@@ -1168,6 +1174,7 @@ fn validate_from_typed_dict_argument<'db, 'ast>(
         },
         full_object_ty_annotation(arg_ty),
         ignored_keys,
+        emit_diagnostic,
     ))
 }
 
@@ -1183,8 +1190,10 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
     arguments: &'ast Arguments,
     error_node: AnyNodeRef<'ast>,
     mut expression_type_fn: impl FnMut(&ast::Expr, TypeContext<'db>) -> Type<'db>,
-) {
+    emit_diagnostic: bool,
+) -> bool {
     let db = context.db();
+    let mut valid = true;
 
     // Check for a single positional argument, and whether it's a dict literal.
     let has_single_positional_arg = arguments.args.len() == 1;
@@ -1197,7 +1206,7 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
         // positional mapping, so validate the positional argument against the remaining schema.
         let keyword_keys =
             collect_guaranteed_keyword_keys(db, typed_dict, arguments, &unpacked_keyword_types);
-        let mut provided_keys = if has_positional_dict_literal {
+        let (positional_valid, mut provided_keys) = if has_positional_dict_literal {
             validate_from_dict_literal(
                 context,
                 typed_dict,
@@ -1205,6 +1214,7 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
                 error_node,
                 &mut expression_type_fn,
                 &keyword_keys,
+                emit_diagnostic,
             )
         } else {
             let arg = &arguments.args[0];
@@ -1217,19 +1227,24 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
             let arg_ty =
                 expression_type_fn(arg, TypeContext::new(Some(positional_inference_target_ty)));
 
-            if let Some(provided_keys) = validate_from_typed_dict_argument(
+            if let Some((valid, provided_keys)) = validate_from_typed_dict_argument(
                 context,
                 typed_dict,
                 arg,
                 arg_ty,
                 error_node,
                 &keyword_keys,
+                emit_diagnostic,
             ) {
-                provided_keys
+                (valid, provided_keys)
             } else {
+                let mut positional_valid = true;
                 if !positional_target_is_empty && !arg_ty.is_assignable_to(db, positional_target_ty)
                 {
-                    if let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, arg) {
+                    positional_valid = false;
+                    if emit_diagnostic
+                        && let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, arg)
+                    {
                         builder.into_diagnostic(format_args!(
                             "Argument of type `{}` is not assignable to `{}`",
                             arg_ty.display(db),
@@ -1238,35 +1253,58 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
                     }
                 }
 
-                positional_target
-                    .items(db)
-                    .iter()
-                    .filter_map(|(key_name, field)| field.is_required().then_some(key_name.clone()))
-                    .collect()
+                (
+                    positional_valid,
+                    positional_target
+                        .items(db)
+                        .iter()
+                        .filter_map(|(key_name, field)| {
+                            field.is_required().then_some(key_name.clone())
+                        })
+                        .collect(),
+                )
             }
         };
+        valid &= positional_valid;
 
-        provided_keys.extend(validate_from_keywords(
+        let (keyword_valid, keyword_provided_keys) = validate_from_keywords(
             context,
             typed_dict,
             arguments,
             error_node,
             &unpacked_keyword_types,
             &mut expression_type_fn,
-        ));
-        validate_typed_dict_required_keys(context, typed_dict, &provided_keys, error_node);
+            emit_diagnostic,
+        );
+        valid &= keyword_valid;
+        provided_keys.extend(keyword_provided_keys);
+        valid &= validate_typed_dict_required_keys(
+            context,
+            typed_dict,
+            &provided_keys,
+            error_node,
+            emit_diagnostic,
+        );
     } else if has_positional_dict_literal {
         // Single positional dict literal: validate keys and value types directly from the literal,
         // which also allows us to report extra keys that aren't in the `TypedDict` schema.
-        let provided_keys = validate_from_dict_literal(
+        let (provided_keys_valid, provided_keys) = validate_from_dict_literal(
             context,
             typed_dict,
             arguments,
             error_node,
             &mut expression_type_fn,
             &OrderSet::new(),
+            emit_diagnostic,
         );
-        validate_typed_dict_required_keys(context, typed_dict, &provided_keys, error_node);
+        valid &= provided_keys_valid;
+        valid &= validate_typed_dict_required_keys(
+            context,
+            typed_dict,
+            &provided_keys,
+            error_node,
+            emit_diagnostic,
+        );
     } else if has_single_positional_arg {
         // Single positional argument: check if assignable to the target TypedDict.
         // This handles TypedDict, intersections, unions, and type aliases correctly.
@@ -1277,7 +1315,10 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
         let arg_ty = expression_type_fn(arg, TypeContext::new(Some(target_ty)));
 
         if !arg_ty.is_assignable_to(db, target_ty) {
-            if let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, arg) {
+            valid = false;
+            if emit_diagnostic
+                && let Some(builder) = context.report_lint(&INVALID_ARGUMENT_TYPE, arg)
+            {
                 builder.into_diagnostic(format_args!(
                     "Argument of type `{}` is not assignable to `{}`",
                     arg_ty.display(db),
@@ -1288,16 +1329,26 @@ pub(super) fn validate_typed_dict_constructor<'db, 'ast>(
     } else {
         // Keyword-only construction: validate each keyword argument, then check for missing
         // required keys.
-        let provided_keys = validate_from_keywords(
+        let (provided_keys_valid, provided_keys) = validate_from_keywords(
             context,
             typed_dict,
             arguments,
             error_node,
             &unpacked_keyword_types,
             &mut expression_type_fn,
+            emit_diagnostic,
         );
-        validate_typed_dict_required_keys(context, typed_dict, &provided_keys, error_node);
+        valid &= provided_keys_valid;
+        valid &= validate_typed_dict_required_keys(
+            context,
+            typed_dict,
+            &provided_keys,
+            error_node,
+            emit_diagnostic,
+        );
     }
+
+    valid
 }
 
 /// Validates a `TypedDict` constructor call with a single positional dictionary argument
@@ -1309,8 +1360,10 @@ fn validate_from_dict_literal<'db, 'ast>(
     typed_dict_node: AnyNodeRef<'ast>,
     expression_type_fn: &mut impl FnMut(&ast::Expr, TypeContext<'db>) -> Type<'db>,
     ignored_keys: &OrderSet<Name>,
-) -> OrderSet<Name> {
+    emit_diagnostic: bool,
+) -> (bool, OrderSet<Name>) {
     let mut provided_keys = OrderSet::new();
+    let mut valid = true;
     let items = typed_dict.items(context.db());
 
     if let ast::Expr::Dict(dict_expr) = &arguments.args[0] {
@@ -1331,7 +1384,7 @@ fn validate_from_dict_literal<'db, 'ast>(
                     .map(|field| TypeContext::new(Some(field.declared_ty)))
                     .unwrap_or_default();
                 let value_ty = expression_type_fn(&dict_item.value, value_tcx);
-                TypedDictKeyAssignment {
+                valid &= TypedDictKeyAssignment {
                     context,
                     typed_dict,
                     full_object_ty: None,
@@ -1341,14 +1394,14 @@ fn validate_from_dict_literal<'db, 'ast>(
                     key_node: key_expr.into(),
                     value_node: (&dict_item.value).into(),
                     assignment_kind: TypedDictAssignmentKind::Constructor,
-                    emit_diagnostic: true,
+                    emit_diagnostic,
                 }
                 .validate();
             }
         }
     }
 
-    provided_keys
+    (valid, provided_keys)
 }
 
 /// Validates a `TypedDict` constructor call with keywords
@@ -1360,10 +1413,12 @@ fn validate_from_keywords<'db, 'ast>(
     typed_dict_node: AnyNodeRef<'ast>,
     unpacked_keyword_types: &[Option<Type<'db>>],
     expression_type_fn: &mut impl FnMut(&ast::Expr, TypeContext<'db>) -> Type<'db>,
-) -> OrderSet<Name> {
+    emit_diagnostic: bool,
+) -> (bool, OrderSet<Name>) {
     let db = context.db();
     let items = typed_dict.items(db);
     debug_assert_eq!(arguments.keywords.len(), unpacked_keyword_types.len());
+    let mut valid = true;
 
     // Collect keys from explicit keyword arguments
     let mut provided_keys: OrderSet<Name> = arguments
@@ -1385,7 +1440,7 @@ fn validate_from_keywords<'db, 'ast>(
                 .map(|field| TypeContext::new(Some(field.declared_ty)))
                 .unwrap_or_default();
             let value_ty = expression_type_fn(&keyword.value, value_tcx);
-            TypedDictKeyAssignment {
+            valid &= TypedDictKeyAssignment {
                 context,
                 typed_dict,
                 full_object_ty: None,
@@ -1395,7 +1450,7 @@ fn validate_from_keywords<'db, 'ast>(
                 key_node: keyword.into(),
                 value_node: (&keyword.value).into(),
                 assignment_kind: TypedDictAssignmentKind::Constructor,
-                emit_diagnostic: true,
+                emit_diagnostic,
             }
             .validate();
         } else {
@@ -1417,7 +1472,7 @@ fn validate_from_keywords<'db, 'ast>(
                 }
             } else if let Some(unpacked_keys) = extract_unpacked_typed_dict_keys(db, unpacked_type)
             {
-                provided_keys.extend(validate_extracted_typed_dict_keys(
+                let (unpacked_valid, unpacked_provided_keys) = validate_extracted_typed_dict_keys(
                     context,
                     typed_dict,
                     &unpacked_keys,
@@ -1428,12 +1483,15 @@ fn validate_from_keywords<'db, 'ast>(
                     },
                     full_object_ty_annotation(unpacked_type),
                     &OrderSet::new(),
-                ));
+                    emit_diagnostic,
+                );
+                valid &= unpacked_valid;
+                provided_keys.extend(unpacked_provided_keys);
             }
         }
     }
 
-    provided_keys
+    (valid, provided_keys)
 }
 
 /// Validates a `TypedDict` dictionary literal assignment,
@@ -1474,8 +1532,13 @@ pub(super) fn validate_typed_dict_dict_literal<'db>(
         }
     }
 
-    valid &=
-        validate_typed_dict_required_keys(context, typed_dict, &provided_keys, typed_dict_node);
+    valid &= validate_typed_dict_required_keys(
+        context,
+        typed_dict,
+        &provided_keys,
+        typed_dict_node,
+        true,
+    );
 
     if valid {
         Ok(provided_keys)
