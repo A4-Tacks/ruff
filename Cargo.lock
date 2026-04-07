@@ -4428,6 +4428,7 @@ dependencies = [
  "ty_project",
  "ty_python_semantic",
  "ty_server",
+ "ty_site_packages",
  "ty_static",
  "wild",
 ]
@@ -4503,7 +4504,9 @@ dependencies = [
  "tracing",
  "ty_module_resolver",
  "ty_project",
+ "ty_python_core",
  "ty_python_semantic",
+ "ty_site_packages",
  "ty_vendored",
 ]
 
@@ -4572,8 +4575,37 @@ dependencies = [
  "tracing",
  "ty_combine",
  "ty_module_resolver",
+ "ty_python_core",
  "ty_python_semantic",
+ "ty_site_packages",
  "ty_static",
+ "ty_vendored",
+]
+
+[[package]]
+name = "ty_python_core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "bitvec",
+ "get-size2",
+ "hashbrown 0.16.1",
+ "itertools 0.14.0",
+ "ruff_db",
+ "ruff_index",
+ "ruff_memory_usage",
+ "ruff_python_ast",
+ "ruff_python_parser",
+ "ruff_python_trivia",
+ "ruff_text_size",
+ "rustc-hash",
+ "salsa",
+ "smallvec",
+ "static_assertions",
+ "tracing",
+ "ty_module_resolver",
+ "ty_site_packages",
  "ty_vendored",
 ]
 
@@ -4583,14 +4615,12 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bitflags 2.11.0",
- "bitvec",
  "camino",
  "compact_str",
  "datatest-stable",
  "drop_bomb",
  "get-size2",
  "glob",
- "hashbrown 0.16.1",
  "indexmap",
  "indoc",
  "insta",
@@ -4616,7 +4646,6 @@ dependencies = [
  "salsa",
  "schemars",
  "serde",
- "serde_json",
  "smallvec",
  "static_assertions",
  "strum",
@@ -4624,8 +4653,8 @@ dependencies = [
  "test-case",
  "thiserror 2.0.18",
  "tracing",
- "ty_combine",
  "ty_module_resolver",
+ "ty_python_core",
  "ty_site_packages",
  "ty_static",
  "ty_test",
@@ -4668,6 +4697,7 @@ dependencies = [
  "ty_ide",
  "ty_module_resolver",
  "ty_project",
+ "ty_python_core",
  "ty_python_semantic",
 ]
 
@@ -4681,13 +4711,18 @@ dependencies = [
  "indexmap",
  "ruff_annotate_snippets",
  "ruff_db",
+ "ruff_macros",
  "ruff_python_ast",
  "ruff_python_trivia",
  "ruff_source_file",
  "ruff_text_size",
+ "schemars",
+ "serde",
+ "serde_json",
  "strum",
  "strum_macros",
  "tracing",
+ "ty_combine",
  "ty_static",
 ]
 
@@ -4728,7 +4763,9 @@ dependencies = [
  "toml 1.1.0+spec-1.1.0",
  "tracing",
  "ty_module_resolver",
+ "ty_python_core",
  "ty_python_semantic",
+ "ty_site_packages",
  "ty_static",
  "ty_vendored",
 ]
@@ -4763,7 +4800,7 @@ dependencies = [
  "tracing",
  "ty_ide",
  "ty_project",
- "ty_python_semantic",
+ "ty_python_core",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-test",

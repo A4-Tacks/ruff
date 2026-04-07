@@ -15,9 +15,9 @@ use ruff_python_ast::find_node::covering_node;
 use ruff_python_ast::token::TokenKind;
 use ruff_python_ast::{self as ast, AnyNodeRef};
 use ruff_text_size::{Ranged, TextSize};
+use ty_python_core::definition::Definition;
 use ty_python_semantic::ResolvedDefinition;
 use ty_python_semantic::SemanticModel;
-use ty_python_semantic::semantic_index::definition::Definition;
 use ty_python_semantic::types::Type;
 use ty_python_semantic::types::ide_support::{
     CallSignatureDetails, CallSignatureParameter, call_signature_details,

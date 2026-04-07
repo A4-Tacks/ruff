@@ -7,21 +7,24 @@ use ty_module_resolver::{
 };
 
 use crate::dunder_all::dunder_all_names;
-use crate::semantic_index::definition::{Definition, DefinitionKind, DefinitionState};
-use crate::semantic_index::narrowing_constraints::ScopedNarrowingConstraint;
-use crate::semantic_index::place::{PlaceExprRef, ScopedPlaceId};
-use crate::semantic_index::predicate::{Predicate, ScopedPredicateId};
-use crate::semantic_index::scope::ScopeId;
-use crate::semantic_index::{
-    BindingWithConstraints, BindingWithConstraintsIterator, DeclarationsIterator, get_loop_header,
-    place_table, reachability_constraints_datastructures::ReachabilityConstraints,
-};
-use crate::semantic_index::{DeclarationWithConstraint, global_scope, use_def_map};
+use crate::reachability::{ReachabilityConstraintsExtension, evaluate_reachability};
+use crate::types::narrow::NarrowingEvaluatorExtension;
 use crate::types::{
-    DynamicType, KnownClass, MemberLookupPolicy, Truthiness, Type, TypeAndQualifiers,
-    TypeQualifiers, UnionBuilder, UnionType, binding_type, declaration_type,
+    DynamicType, KnownClass, MemberLookupPolicy, Type, TypeAndQualifiers, TypeQualifiers,
+    UnionBuilder, UnionType, binding_type, declaration_type,
 };
 use crate::{Db, FxIndexSet, FxOrderSet, Program};
+use ty_python_core::definition::{Definition, DefinitionKind, DefinitionState};
+use ty_python_core::narrowing_constraints::ScopedNarrowingConstraint;
+use ty_python_core::place::{PlaceExprRef, ScopedPlaceId};
+use ty_python_core::predicate::{Predicate, ScopedPredicateId};
+use ty_python_core::reachability_constraints::ReachabilityConstraints;
+use ty_python_core::scope::ScopeId;
+use ty_python_core::{
+    BindingWithConstraints, BindingWithConstraintsIterator, BoundnessAnalysis,
+    DeclarationsIterator, Truthiness, get_loop_header, place_table,
+};
+use ty_python_core::{DeclarationWithConstraint, global_scope, use_def_map};
 
 pub(crate) use implicit_globals::{
     module_type_implicit_global_declaration, module_type_implicit_global_symbol,
@@ -1261,7 +1264,7 @@ fn loop_header_reachability_impl<'db>(
         let reachability = if is_cycle_initial {
             Truthiness::Ambiguous
         } else {
-            use_def.evaluate_reachability(db, live_binding.reachability_constraint)
+            evaluate_reachability(db, use_def, live_binding.reachability_constraint)
         };
         // Skip unreachable bindings.
         if reachability.is_always_false() {
@@ -1703,7 +1706,6 @@ fn place_from_declarations_impl<'db>(
         }
 
         first_declaration.get_or_insert(declaration);
-
         let static_reachability =
             reachability_constraints.evaluate(db, predicates, reachability_constraint);
 
@@ -1790,12 +1792,12 @@ pub(crate) mod implicit_globals {
     use crate::Program;
     use crate::db::Db;
     use crate::place::{Definedness, PlaceAndQualifiers};
-    use crate::semantic_index::symbol::Symbol;
-    use crate::semantic_index::{place_table, use_def_map};
     use crate::types::{
         ClassLiteral, KnownClass, MemberLookupPolicy, Parameter, Parameters, Signature, Type,
     };
     use ruff_python_ast::PythonVersion;
+    use ty_python_core::symbol::Symbol;
+    use ty_python_core::{place_table, use_def_map};
 
     use super::{DefinedPlace, Place, place_from_declarations};
 
@@ -2070,26 +2072,6 @@ pub(crate) enum ConsideredDefinitions {
     EndOfScope,
     /// Consider all definitions that are reachable from the start of the scope.
     AllReachable,
-}
-
-/// Specifies how the boundness of a place should be determined.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, salsa::Update)]
-pub(crate) enum BoundnessAnalysis {
-    /// The place is always considered bound.
-    AssumeBound,
-    /// The boundness of the place is determined based on the visibility of the implicit
-    /// `unbound` binding. In the example below, when analyzing the visibility of the
-    /// `x = <unbound>` binding from the position of the end of the scope, it would be
-    /// `Truthiness::Ambiguous`, because it could either be visible or not, depending on the
-    /// `flag()` return value. This would result in a `Definedness::PossiblyUndefined` for `x`.
-    ///
-    /// ```py
-    /// x = <unbound>
-    ///
-    /// if flag():
-    ///     x = 1
-    /// ```
-    BasedOnUnboundVisibility,
 }
 
 #[cfg(test)]
