@@ -103,7 +103,7 @@ pub(super) struct SemanticIndexBuilder<'db, 'ast> {
     current_assignments: Vec<CurrentAssignment<'ast, 'db>>,
     /// The statements we're currently visiting, with
     /// the most recent visit at the end of the Vec.
-    current_statements: Vec<CurrentStatement>,
+    current_statements: Vec<CurrentStatement<'ast>>,
     /// The match case we're currently visiting.
     current_match_case: Option<CurrentMatchCase<'ast>>,
     /// The name of the first function parameter of the innermost function that we're currently visiting.
@@ -1338,15 +1338,15 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         self.current_assignments.last_mut()
     }
 
-    fn push_statement(&mut self, statement: CurrentStatement) {
+    fn push_statement(&mut self, statement: CurrentStatement<'ast>) {
         self.current_statements.push(statement);
     }
 
-    fn pop_statement(&mut self) -> CurrentStatement {
+    fn pop_statement(&mut self) -> CurrentStatement<'ast> {
         self.current_statements.pop().unwrap()
     }
 
-    fn current_statement_mut(&mut self) -> Option<&mut CurrentStatement> {
+    fn current_statement_mut(&mut self) -> Option<&mut CurrentStatement<'ast>> {
         self.current_statements.last_mut()
     }
 
@@ -3176,20 +3176,21 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
     fn visit_stmt(&mut self, stmt: &'ast ast::Stmt) {
         self.push_statement(CurrentStatement {
-            lambda_keys: Vec::new(),
+            lambda_exprs: Vec::new(),
         });
 
         self.visit_stmt_impl(stmt);
 
-        let statement = self.pop_statement();
-        if !statement.lambda_keys.is_empty() {
+        let current_statement = self.pop_statement();
+        if !current_statement.lambda_exprs.is_empty() {
             // The body of a lambda expression needs access to the `Callable` type
             // context the lambda is being inferred with, and so any statement
-            // containing a lambda must be inferable as a standalone statement.
+            // containing a lambda must be inferable as a standalone statement
+            // to avoid large scope-level cycles.
             let standalone_stmt = self.add_standalone_statement(stmt);
-            for lambda in statement.lambda_keys {
+            for lambda in current_statement.lambda_exprs {
                 self.enclosing_lambda_statements
-                    .insert(lambda, standalone_stmt);
+                    .insert(lambda.into(), standalone_stmt);
             }
         }
     }
@@ -3325,7 +3326,7 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
             }
             ast::Expr::Lambda(lambda) => {
                 if let Some(current_statement) = self.current_statement_mut() {
-                    current_statement.lambda_keys.push(lambda.into());
+                    current_statement.lambda_exprs.push(lambda);
                 }
 
                 if let Some(parameters) = &lambda.parameters {
@@ -3769,9 +3770,9 @@ impl<'ast> From<&'ast ast::ExprNamed> for CurrentAssignment<'ast, '_> {
     }
 }
 
-struct CurrentStatement {
+struct CurrentStatement<'ast> {
     /// The lambda expressions part of this statement.
-    lambda_keys: Vec<ExpressionNodeKey>,
+    lambda_exprs: Vec<&'ast ast::ExprLambda>,
 }
 
 #[derive(Debug, PartialEq)]

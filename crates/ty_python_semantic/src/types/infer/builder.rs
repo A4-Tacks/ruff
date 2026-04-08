@@ -8699,8 +8699,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             declarations,
             deferred,
             cycle_recovery,
-            undecorated_type,
             called_functions,
+
+            // Ignored; only relevant to definition regions
+            undecorated_type: _,
 
             // builder only state
             expression_cache: _,
@@ -8719,7 +8721,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let extra = (!diagnostics.is_empty()
             || !string_annotations.is_empty()
             || cycle_recovery.is_some()
-            || undecorated_type.is_some()
             || !deferred.is_empty()
             || !called_functions.is_empty()
             || !qualifiers.is_empty())
@@ -8734,7 +8735,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 cycle_recovery,
                 deferred: deferred.into_boxed_slice(),
                 diagnostics,
-                undecorated_type,
                 qualifiers,
             })
         });

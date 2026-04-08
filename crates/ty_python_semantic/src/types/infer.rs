@@ -1073,7 +1073,7 @@ pub(crate) struct StatementInferenceInner<'db> {
     scope: ScopeId<'db>,
 
     /// The types of every binding in this region.
-    pub(crate) bindings: Box<[(Definition<'db>, Type<'db>)]>,
+    bindings: Box<[(Definition<'db>, Type<'db>)]>,
 
     /// The types and type qualifiers of every declaration in this region.
     declarations: Box<[(Definition<'db>, TypeAndQualifiers<'db>)]>,
@@ -1098,9 +1098,6 @@ struct StatementInferenceInnerExtra<'db> {
 
     /// The diagnostics for this region.
     diagnostics: TypeCheckDiagnostics,
-
-    /// For function definitions, the undecorated type of the function.
-    undecorated_type: Option<Type<'db>>,
 
     /// Type qualifiers (`Required`, `NotRequired`, etc.) for annotation expressions.
     /// Only populated for expressions that have non-empty qualifiers.

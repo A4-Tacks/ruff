@@ -44,7 +44,7 @@ pub(crate) mod predicate;
 mod re_exports;
 mod reachability_constraints;
 pub(crate) mod scope;
-pub mod statement;
+pub(crate) mod statement;
 pub(crate) mod symbol;
 mod use_def;
 
@@ -324,13 +324,13 @@ pub(crate) struct SemanticIndex<'db> {
     /// Map from a standalone expression to its [`Expression`] ingredient.
     expressions_by_node: FxHashMap<ExpressionNodeKey, Expression<'db>>,
 
-    /// Map from a standalone statemetn to its [`Statement`] ingredient.
+    /// Map from a standalone statement to its [`Statement`] ingredient.
     statements_by_node: FxHashMap<StatementNodeKey, Statement<'db>>,
 
     /// Map from nodes that create a scope to the scope they create.
     scopes_by_node: FxHashMap<NodeWithScopeKey, FileScopeId>,
 
-    /// Maps from lambda expressions to their containing statement.
+    /// Map from a lambda expression to its containing statement.
     enclosing_lambda_statements: FxHashMap<ExpressionNodeKey, Statement<'db>>,
 
     /// Map from the file-local [`FileScopeId`] to the salsa-ingredient [`ScopeId`].
