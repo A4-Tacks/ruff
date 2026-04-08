@@ -2733,7 +2733,7 @@ impl<'db> Type<'db> {
                 if let Some(inferable) = inferable {
                     when = when.remove_noninferable(db, builder, inferable);
                 }
-                PathBounds::compute(db, &builder, when.node)
+                PathBounds::compute(db, builder, when.node)
             })
         }
 
