@@ -1648,7 +1648,9 @@ pub(crate) struct SpecializationBuilder<'db, 'c> {
     db: &'db dyn Db,
     constraints: &'c ConstraintSetBuilder<'db>,
     inferable: InferableTypeVars<'db>,
+    pending: ConstraintSet<'db, 'c>,
     types: FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>>,
+    paramspec_seen: FxHashSet<BoundTypeVarIdentity<'db>>,
 }
 
 impl<'db, 'c> SpecializationBuilder<'db, 'c> {
@@ -1661,7 +1663,9 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             db,
             constraints,
             inferable,
+            pending: ConstraintSet::from_bool(constraints, true),
             types: FxHashMap::default(),
+            paramspec_seen: FxHashSet::default(),
         }
     }
 
