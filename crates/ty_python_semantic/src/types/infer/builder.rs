@@ -49,7 +49,7 @@ use crate::semantic_index::place::{PlaceExpr, PlaceExprRef};
 use crate::semantic_index::scope::{
     FileScopeId, NodeWithScopeKind, NodeWithScopeRef, ScopeId, ScopeKind,
 };
-use crate::semantic_index::statement::Statement;
+use crate::semantic_index::statement::{Statement, StatementInner};
 use crate::semantic_index::symbol::{ScopedSymbolId, Symbol};
 use crate::semantic_index::{
     ApplicableConstraints, EnclosingSnapshotResult, SemanticIndex, place_table,
@@ -91,8 +91,8 @@ use crate::types::generics::{InferableTypeVars, SpecializationBuilder, bind_type
 use crate::types::infer::builder::named_tuple::NamedTupleKind;
 use crate::types::infer::builder::paramspec_validation::validate_paramspec_components;
 use crate::types::infer::{
-    StatementInference, StatementInferenceExtra, infer_statement_types, nearest_enclosing_class,
-    nearest_enclosing_function,
+    StatementInference, StatementInferenceInner, StatementInferenceInnerExtra,
+    infer_statement_types, nearest_enclosing_class, nearest_enclosing_function,
 };
 use crate::types::newtype::NewType;
 use crate::types::set_theoretic::RecursivelyDefined;
@@ -396,6 +396,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     }
 
     fn extend_statement(&mut self, inference: &StatementInference<'db>) {
+        let inference = match inference {
+            StatementInference::Other(inference) => inference,
+            StatementInference::Expression(inference) => return self.extend_expression(inference),
+            StatementInference::Definition(inference) => return self.extend_definition(inference),
+        };
+
         #[cfg(debug_assertions)]
         assert_eq!(self.scope, inference.scope);
 
@@ -779,7 +785,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
     }
 
-    fn infer_region_statement(&mut self, statement: Statement<'db>) {
+    fn infer_region_statement(&mut self, statement: StatementInner<'db>) {
         self.infer_statement(statement.node_ref(self.db()).node(self.module()));
     }
 
@@ -1465,6 +1471,25 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     fn infer_body(&mut self, suite: &[ast::Stmt]) {
         for statement in suite {
             self.infer_maybe_standalone_statement(statement);
+
+            if let ast::Stmt::Expr(ast::StmtExpr {
+                range: _,
+                node_index: _,
+                value,
+            }) = statement
+            {
+                let ty = self.expression_type(value);
+                if ty.is_awaitable(self.db()) && !self.is_known_function_call(value) {
+                    if let Some(builder) =
+                        self.context.report_lint(&UNUSED_AWAITABLE, value.as_ref())
+                    {
+                        builder.into_diagnostic(format_args!(
+                            "Object of type `{}` is not awaited",
+                            ty.display(self.db()),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -1479,18 +1504,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }) => {
                 // If this is a call expression, we would have added an `IsNonTerminalCall`
                 // constraint, meaning this will be a standalone expression.
-                let ty = self.infer_maybe_standalone_expression(value, TypeContext::default());
-
-                if ty.is_awaitable(self.db()) && !self.is_known_function_call(value) {
-                    if let Some(builder) =
-                        self.context.report_lint(&UNUSED_AWAITABLE, value.as_ref())
-                    {
-                        builder.into_diagnostic(format_args!(
-                            "Object of type `{}` is not awaited",
-                            ty.display(self.db()),
-                        ));
-                    }
-                }
+                self.infer_maybe_standalone_expression(value, TypeContext::default());
             }
             ast::Stmt::If(if_statement) => self.infer_if_statement(if_statement),
             ast::Stmt::Try(try_statement) => self.infer_try_statement(try_statement),
@@ -4981,7 +4995,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
     fn infer_standalone_statement_impl(&mut self, standalone_statement: Statement<'db>) {
         let types = infer_statement_types(self.db(), standalone_statement);
-        self.extend_statement(types);
+        self.extend_statement(&types);
     }
 
     fn infer_optional_expression(
@@ -8672,7 +8686,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }
     }
 
-    pub(super) fn finish_statement(mut self) -> StatementInference<'db> {
+    pub(super) fn finish_statement(mut self) -> StatementInferenceInner<'db> {
         self.infer_region();
 
         let Self {
@@ -8691,7 +8705,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             // builder only state
             expression_cache: _,
             dataclass_field_specifiers: _,
-            all_definitely_bound: _,
             typevar_binding_context: _,
             inference_flags: _,
             deferred_state: _,
@@ -8712,7 +8725,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             || !qualifiers.is_empty())
         .then(|| {
             qualifiers.shrink_to_fit();
-            Box::new(StatementInferenceExtra {
+            Box::new(StatementInferenceInnerExtra {
                 string_annotations,
                 called_functions: called_functions
                     .into_iter()
@@ -8744,7 +8757,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         expressions.shrink_to_fit();
 
-        StatementInference {
+        StatementInferenceInner {
             expressions,
             #[cfg(debug_assertions)]
             scope,

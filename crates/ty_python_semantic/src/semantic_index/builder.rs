@@ -47,7 +47,7 @@ use crate::semantic_index::scope::{
     FileScopeId, NodeWithScopeKey, NodeWithScopeKind, NodeWithScopeRef,
 };
 use crate::semantic_index::scope::{Scope, ScopeId, ScopeKind, ScopeLaziness};
-use crate::semantic_index::statement::{Statement, StatementNodeKey};
+use crate::semantic_index::statement::{Statement, StatementInner, StatementNodeKey};
 use crate::semantic_index::symbol::{ScopedSymbolId, Symbol};
 use crate::semantic_index::use_def::{
     EnclosingSnapshotKey, FlowSnapshot, PreviousDefinitions, ScopedDefinitionId,
@@ -99,10 +99,11 @@ pub(super) struct SemanticIndexBuilder<'db, 'ast> {
     module: &'ast ParsedModuleRef,
     scope_stack: Vec<ScopeInfo>,
     /// The assignments we're currently visiting, with
-    /// the most recent visit at the end of the Vec
+    /// the most recent visit at the end of the Vec.
     current_assignments: Vec<CurrentAssignment<'ast, 'db>>,
-    /// The statement we're currently visiting.
-    current_statement: Option<(&'ast ast::Stmt, FileScopeId)>,
+    /// The statements we're currently visiting, with
+    /// the most recent visit at the end of the Vec.
+    current_statements: Vec<CurrentStatement>,
     /// The match case we're currently visiting.
     current_match_case: Option<CurrentMatchCase<'ast>>,
     /// The name of the first function parameter of the innermost function that we're currently visiting.
@@ -154,8 +155,8 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
             source_type: file.source_type(db),
             module: module_ref,
             scope_stack: Vec::new(),
-            current_assignments: vec![],
-            current_statement: None,
+            current_assignments: Vec::new(),
+            current_statements: Vec::new(),
             current_match_case: None,
             current_first_parameter_name: None,
             try_node_context_stack_manager: TryNodeContextStackManager::default(),
@@ -207,6 +208,20 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 
     fn current_scope(&self) -> FileScopeId {
         self.current_scope_info().file_scope_id
+    }
+
+    pub(crate) fn expect_single_definition(
+        &self,
+        definition_key: impl Into<DefinitionNodeKey> + std::fmt::Debug + Copy,
+    ) -> Definition<'db> {
+        let definitions = &self.definitions_by_node[&definition_key.into()];
+        debug_assert_eq!(
+            definitions.len(),
+            1,
+            "Expected exactly one definition to be associated with AST node {definition_key:?} but found {}",
+            definitions.len()
+        );
+        definitions[0]
     }
 
     /// Returns an iterator over ancestors of `scope` that are visible for name resolution,
@@ -1323,6 +1338,18 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         self.current_assignments.last_mut()
     }
 
+    fn push_statement(&mut self, statement: CurrentStatement) {
+        self.current_statements.push(statement);
+    }
+
+    fn pop_statement(&mut self) -> CurrentStatement {
+        self.current_statements.pop().unwrap()
+    }
+
+    fn current_statement_mut(&mut self) -> Option<&mut CurrentStatement> {
+        self.current_statements.last_mut()
+    }
+
     fn predicate_kind(&mut self, pattern: &ast::Pattern) -> PatternPredicateKind<'db> {
         match pattern {
             ast::Pattern::MatchValue(pattern) => {
@@ -1483,17 +1510,51 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
         expression
     }
 
-    fn add_standalone_statement(
-        &mut self,
-        statement_node: &ast::Stmt,
-        scope: FileScopeId,
-    ) -> Statement<'db> {
-        let statement = Statement::new(
-            self.db,
-            self.file,
-            scope,
-            AstNodeRef::new(self.module, statement_node),
-        );
+    fn add_standalone_statement(&mut self, statement_node: &ast::Stmt) -> Statement<'db> {
+        // Avoid allocating a salsa ingredient if the statement represents an existing
+        // definition or standalone expression.
+        let statement = match statement_node {
+            ast::Stmt::FunctionDef(function) => Some(Statement::Definition(
+                self.expect_single_definition(function),
+            )),
+            ast::Stmt::ClassDef(class) => {
+                Some(Statement::Definition(self.expect_single_definition(class)))
+            }
+            ast::Stmt::Expr(expr) => self
+                .expressions_by_node
+                .get(&(&expr.value).into())
+                .copied()
+                .map(Statement::Expression),
+            ast::Stmt::Assign(assign) => {
+                if let [ast::Expr::Name(name)] = &assign.targets[..] {
+                    Some(Statement::Definition(self.expect_single_definition(name)))
+                } else {
+                    None
+                }
+            }
+            ast::Stmt::AnnAssign(assign) if assign.target.is_name_expr() => {
+                Some(Statement::Definition(self.expect_single_definition(assign)))
+            }
+            ast::Stmt::AugAssign(assign) if assign.target.is_name_expr() => {
+                Some(Statement::Definition(self.expect_single_definition(assign)))
+            }
+            ast::Stmt::TypeAlias(alias) => {
+                Some(Statement::Definition(self.expect_single_definition(alias)))
+            }
+            _ => None,
+        };
+
+        let statement = if let Some(statement) = statement {
+            statement
+        } else {
+            Statement::Other(StatementInner::new(
+                self.db,
+                self.file,
+                self.current_scope(),
+                AstNodeRef::new(self.module, statement_node),
+            ))
+        };
+
         self.statements_by_node
             .insert(statement_node.into(), statement);
         statement
@@ -3114,9 +3175,23 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
 
 impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
     fn visit_stmt(&mut self, stmt: &'ast ast::Stmt) {
-        self.current_statement = Some((stmt, self.current_scope()));
+        self.push_statement(CurrentStatement {
+            lambda_keys: Vec::new(),
+        });
+
         self.visit_stmt_impl(stmt);
-        self.current_statement = None;
+
+        let statement = self.pop_statement();
+        if !statement.lambda_keys.is_empty() {
+            // The body of a lambda expression needs access to the `Callable` type
+            // context the lambda is being inferred with, and so any statement
+            // containing a lambda must be inferable as a standalone statement.
+            let standalone_stmt = self.add_standalone_statement(stmt);
+            for lambda in statement.lambda_keys {
+                self.enclosing_lambda_statements
+                    .insert(lambda, standalone_stmt);
+            }
+        }
     }
 
     fn visit_keyword(&mut self, keyword: &'ast ast::Keyword) {
@@ -3249,13 +3324,8 @@ impl<'ast> Visitor<'ast> for SemanticIndexBuilder<'_, 'ast> {
                 }
             }
             ast::Expr::Lambda(lambda) => {
-                // The body of a lambda expression needs access to the `Callable` type
-                // context the lambda is being inferred with, and so any statement
-                // containing a lambda must be inferable as a standalone statement.
-                if let Some((stmt, scope)) = self.current_statement {
-                    let standalone_stmt = self.add_standalone_statement(stmt, scope);
-                    self.enclosing_lambda_statements
-                        .insert(lambda.into(), standalone_stmt);
+                if let Some(current_statement) = self.current_statement_mut() {
+                    current_statement.lambda_keys.push(lambda.into());
                 }
 
                 if let Some(parameters) = &lambda.parameters {
@@ -3697,6 +3767,11 @@ impl<'ast> From<&'ast ast::ExprNamed> for CurrentAssignment<'ast, '_> {
     fn from(value: &'ast ast::ExprNamed) -> Self {
         Self::Named(value)
     }
+}
+
+struct CurrentStatement {
+    /// The lambda expressions part of this statement.
+    lambda_keys: Vec<ExpressionNodeKey>,
 }
 
 #[derive(Debug, PartialEq)]

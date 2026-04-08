@@ -1,10 +1,25 @@
 use crate::ast_node_ref::AstNodeRef;
 use crate::db::Db;
 use crate::node_key::NodeKey;
+use crate::semantic_index::definition::Definition;
+use crate::semantic_index::expression::Expression;
 use crate::semantic_index::scope::{FileScopeId, ScopeId};
 use ruff_db::files::File;
 use ruff_python_ast as ast;
 use salsa;
+
+/// An independently type-inferable statement.
+///
+/// Many statements can be treated directly as definitions or expressions,
+/// and so do not require a separate Salsa allocation.
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, PartialEq, salsa::Supertype, salsa::Update, get_size2::GetSize,
+)]
+pub(crate) enum Statement<'db> {
+    Expression(Expression<'db>),
+    Definition(Definition<'db>),
+    Other(StatementInner<'db>),
+}
 
 /// An independently type-inferable statement.
 ///
@@ -20,7 +35,7 @@ use salsa;
 /// * a field of a type that is a return type of a cross-module query
 /// * an argument of a cross-module query
 #[salsa::tracked(debug, heap_size=ruff_memory_usage::heap_size)]
-pub(crate) struct Statement<'db> {
+pub(crate) struct StatementInner<'db> {
     /// The file in which the statement occurs.
     pub(crate) file: File,
 
@@ -35,9 +50,9 @@ pub(crate) struct Statement<'db> {
 }
 
 // The Salsa heap is tracked separately.
-impl get_size2::GetSize for Statement<'_> {}
+impl get_size2::GetSize for StatementInner<'_> {}
 
-impl<'db> Statement<'db> {
+impl<'db> StatementInner<'db> {
     pub(crate) fn scope(self, db: &'db dyn Db) -> ScopeId<'db> {
         self.file_scope(db).to_scope_id(db, self.file(db))
     }

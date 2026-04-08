@@ -8,9 +8,9 @@
 //!
 //! Statement-level inference is needed in only a few cases. Some expressions need access to
 //! type context from a parent expression, e.g., the type of lambda parameter depends on the
-//! annotated type of the lambda. Statements are the minimal unit that can be inferred without
-//! external type context, and so statement-level inference allows us to resolve type context
-//! without relying on scope-level inference cycles.
+//! annotated type of the lambda. Statements are the minimal unit of code that can be inferred
+//! without external type context, and so statement-level inference allows us to resolve type
+//! context without relying on scope-level inference cycles.
 //!
 //! Definition-level inference allows us to look up the types of places in other scopes (e.g. for
 //! imports) with the minimum inference necessary, so that if we're looking up one place from a
@@ -54,7 +54,7 @@ use crate::semantic_index::ast_ids::node_key::ExpressionNodeKey;
 use crate::semantic_index::definition::Definition;
 use crate::semantic_index::expression::Expression;
 use crate::semantic_index::scope::ScopeId;
-use crate::semantic_index::statement::Statement;
+use crate::semantic_index::statement::{Statement, StatementInner};
 use crate::semantic_index::{SemanticIndex, semantic_index};
 use crate::types::diagnostic::TypeCheckDiagnostics;
 use crate::types::function::{FunctionDecorators, FunctionType};
@@ -395,18 +395,39 @@ fn infer_expression_type_impl<'db>(db: &'db dyn Db, input: InferExpression<'db>)
     inference.expression_type(expression.node_ref(db))
 }
 
-#[salsa::tracked(
-    returns(ref),
-    cycle_initial=statement_cycle_initial,
-    cycle_fn=|db, cycle, previous: &StatementInference<'db>, inference: StatementInference<'db>, _| {
-        inference.cycle_normalized(db, previous, cycle)
-    },
-    heap_size=ruff_memory_usage::heap_size
-)]
+/// Infer all types for a [`Statement`].
+///
+/// This is useful when you want to infer a sub-expression with its natural type context, as
+/// statements are the minimal unit of code that can be inferred without external type context.
 pub(super) fn infer_statement_types<'db>(
     db: &'db dyn Db,
     statement: Statement<'db>,
 ) -> StatementInference<'db> {
+    match statement {
+        Statement::Expression(expression) => StatementInference::Expression(
+            infer_expression_types(db, expression, TypeContext::default()),
+        ),
+        Statement::Definition(definition) => {
+            StatementInference::Definition(infer_definition_types(db, definition))
+        }
+        Statement::Other(statement) => {
+            StatementInference::Other(infer_statement_types_impl(db, statement))
+        }
+    }
+}
+
+#[salsa::tracked(
+    returns(ref),
+    cycle_initial=statement_cycle_initial,
+    cycle_fn=|db, cycle, previous: &StatementInferenceInner<'db>, inference: StatementInferenceInner<'db>, _| {
+        inference.cycle_normalized(db, previous, cycle)
+    },
+    heap_size=ruff_memory_usage::heap_size
+)]
+fn infer_statement_types_impl<'db>(
+    db: &'db dyn Db,
+    statement: StatementInner<'db>,
+) -> StatementInferenceInner<'db> {
     let file = statement.file(db);
     let module = parsed_module(db, file).load(db);
     let _span = tracing::trace_span!(
@@ -426,10 +447,10 @@ pub(super) fn infer_statement_types<'db>(
 fn statement_cycle_initial<'db>(
     db: &'db dyn Db,
     id: salsa::Id,
-    statement: Statement<'db>,
-) -> StatementInference<'db> {
+    statement: StatementInner<'db>,
+) -> StatementInferenceInner<'db> {
     let cycle_recovery = Type::divergent(id);
-    StatementInference::cycle_initial(statement.scope(db), cycle_recovery)
+    StatementInferenceInner::cycle_initial(statement.scope(db), cycle_recovery)
 }
 
 /// An `Expression` with an optional `TypeContext`.
@@ -631,7 +652,7 @@ pub(crate) fn nearest_enclosing_function<'db>(
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum InferenceRegion<'db> {
     // infer types for a [`Statement`].
-    Statement(Statement<'db>),
+    Statement(StatementInner<'db>),
     /// infer types for a standalone [`Expression`]
     Expression(Expression<'db>, TypeContext<'db>),
     /// infer types for a [`Definition`]
@@ -1021,8 +1042,29 @@ impl<'db> ExpressionInference<'db> {
 }
 
 /// The inferred types for a statement region.
+///
+/// Many statements can be treated directly as definitions or expressions,
+/// and so simply wrapped the inference result of those regions.
+#[derive(Debug, Eq, PartialEq, get_size2::GetSize)]
+pub(crate) enum StatementInference<'db> {
+    Expression(&'db ExpressionInference<'db>),
+    Definition(&'db DefinitionInference<'db>),
+    Other(&'db StatementInferenceInner<'db>),
+}
+
+impl<'db> StatementInference<'db> {
+    pub(crate) fn expression_type(&self, expression: impl Into<ExpressionNodeKey>) -> Type<'db> {
+        match self {
+            StatementInference::Expression(inference) => inference.expression_type(expression),
+            StatementInference::Definition(inference) => inference.expression_type(expression),
+            StatementInference::Other(inference) => inference.expression_type(expression),
+        }
+    }
+}
+
+/// The inferred types for a statement region.
 #[derive(Debug, Eq, PartialEq, salsa::Update, get_size2::GetSize)]
-pub(crate) struct StatementInference<'db> {
+pub(crate) struct StatementInferenceInner<'db> {
     /// The types of every expression in this region.
     expressions: FxHashMap<ExpressionNodeKey, Type<'db>>,
 
@@ -1037,11 +1079,11 @@ pub(crate) struct StatementInference<'db> {
     declarations: Box<[(Definition<'db>, TypeAndQualifiers<'db>)]>,
 
     /// The extra data that is only present for few inference regions.
-    extra: Option<Box<StatementInferenceExtra<'db>>>,
+    extra: Option<Box<StatementInferenceInnerExtra<'db>>>,
 }
 
 #[derive(Debug, Eq, PartialEq, get_size2::GetSize, salsa::Update, Default)]
-struct StatementInferenceExtra<'db> {
+struct StatementInferenceInnerExtra<'db> {
     /// String annotations found in this region
     string_annotations: FxHashSet<ExpressionNodeKey>,
 
@@ -1065,7 +1107,7 @@ struct StatementInferenceExtra<'db> {
     qualifiers: FxHashMap<ExpressionNodeKey, TypeQualifiers>,
 }
 
-impl<'db> StatementInference<'db> {
+impl<'db> StatementInferenceInner<'db> {
     fn cycle_initial(scope: ScopeId<'db>, cycle_recovery: Type<'db>) -> Self {
         let _ = scope;
 
@@ -1075,9 +1117,9 @@ impl<'db> StatementInference<'db> {
             declarations: Box::default(),
             #[cfg(debug_assertions)]
             scope,
-            extra: Some(Box::new(StatementInferenceExtra {
+            extra: Some(Box::new(StatementInferenceInnerExtra {
                 cycle_recovery: Some(cycle_recovery),
-                ..StatementInferenceExtra::default()
+                ..StatementInferenceInnerExtra::default()
             })),
         }
     }
@@ -1085,9 +1127,9 @@ impl<'db> StatementInference<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        previous_inference: &StatementInference<'db>,
+        previous_inference: &StatementInferenceInner<'db>,
         cycle: &salsa::Cycle,
-    ) -> StatementInference<'db> {
+    ) -> StatementInferenceInner<'db> {
         for (expr, ty) in &mut self.expressions {
             let previous_ty = previous_inference.expression_type(*expr);
             *ty = ty.cycle_normalized(db, previous_ty, cycle);
