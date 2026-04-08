@@ -88,6 +88,9 @@ use crate::types::function::{
 use crate::types::generics::{InferableTypeVars, SpecializationBuilder, bind_typevar};
 use crate::types::infer::builder::named_tuple::NamedTupleKind;
 use crate::types::infer::builder::paramspec_validation::validate_paramspec_components;
+use crate::types::infer::builder::typed_dict::{
+    TypedDictConstructorBindingStrategy, TypedDictConstructorForm,
+};
 use crate::types::infer::{nearest_enclosing_class, nearest_enclosing_function};
 use crate::types::newtype::NewType;
 use crate::types::set_theoretic::RecursivelyDefined;
@@ -109,8 +112,6 @@ use crate::types::{
 };
 use crate::unpack::UnpackPosition;
 use crate::{AnalysisSettings, Db, FxIndexSet, Program};
-
-use self::typed_dict::{TypedDictConstructorBindingStrategy, TypedDictConstructorForm};
 
 mod annotation_expression;
 mod binary_expressions;
@@ -6534,6 +6535,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         call_arguments
     }
+
     fn infer_call_expression(
         &mut self,
         call_expression: &ast::ExprCall,
