@@ -89,5 +89,9 @@ schemars = ["dep:schemars", "ruff_python_ast/schemars"]
 # Enables rules for internal integration tests
 test-rules = []
 
+[[test]]
+name = "mdtest"
+harness = false
+
 [lints]
 workspace = true
