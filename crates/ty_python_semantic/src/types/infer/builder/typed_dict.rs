@@ -1,3 +1,4 @@
+use ordermap::OrderSet;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::{self as ast, AnyNodeRef, HasNodeIndex, NodeIndex};
 use rustc_hash::FxHashMap;
@@ -15,9 +16,9 @@ use crate::types::diagnostic::{
 use crate::types::infer::builder::DeferredExpressionState;
 use crate::types::special_form::TypeQualifier;
 use crate::types::typed_dict::{
-    TypedDictSchema, collect_guaranteed_keyword_keys, functional_typed_dict_field,
-    infer_unpacked_keyword_types, typed_dict_with_relaxed_keys, validate_typed_dict_constructor,
-    validate_typed_dict_dict_literal,
+    TypedDictSchema, collect_guaranteed_keyword_keys, extract_unpacked_typed_dict_keys,
+    functional_typed_dict_field, infer_unpacked_keyword_types, typed_dict_with_relaxed_keys,
+    validate_typed_dict_constructor, validate_typed_dict_dict_literal,
 };
 use crate::types::{
     IntersectionType, KnownClass, Type, TypeAndQualifiers, TypeContext, TypedDictType, UnionType,
@@ -381,6 +382,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     typed_dict,
                     arguments,
                     &unpacked_keyword_types,
+                    &mut |expr, tcx| self.get_or_infer_expression(expr, tcx),
                 );
                 let positional_target =
                     typed_dict_with_relaxed_keys(self.db(), typed_dict, &keyword_keys);
@@ -430,8 +432,8 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     /// Infer keyword argument values for a `TypedDict` constructor.
     ///
     /// Named keywords are inferred against the declared type of the matching `TypedDict` field.
-    /// Unpacked `**kwargs` and unknown keys fall back to default inference because they do not
-    /// map to a single field declaration at this stage.
+    /// Literal `**{...}` entries are inferred against matching field types as well; other unpacked
+    /// `**kwargs` and unknown keys fall back to default inference.
     fn infer_typed_dict_constructor_keyword_values(
         &mut self,
         typed_dict: TypedDictType<'db>,
@@ -439,14 +441,90 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     ) {
         let items = typed_dict.items(self.db());
         for keyword in &arguments.keywords {
-            let value_tcx = keyword
-                .arg
-                .as_ref()
-                .and_then(|arg_name| items.get(arg_name.id.as_str()))
-                .map(|field| TypeContext::new(Some(field.declared_ty)))
-                .unwrap_or_default();
-            self.get_or_infer_expression(&keyword.value, value_tcx);
+            if let Some(arg_name) = &keyword.arg {
+                let value_tcx = items
+                    .get(arg_name.id.as_str())
+                    .map(|field| TypeContext::new(Some(field.declared_ty)))
+                    .unwrap_or_default();
+                self.get_or_infer_expression(&keyword.value, value_tcx);
+            } else {
+                self.infer_typed_dict_constructor_unpacked_keyword_values(
+                    typed_dict,
+                    &keyword.value,
+                );
+            }
         }
+    }
+
+    /// Pre-infers the values of an unpacked `**kwargs` constructor argument.
+    fn infer_typed_dict_constructor_unpacked_keyword_values(
+        &mut self,
+        typed_dict: TypedDictType<'db>,
+        expr: &ast::Expr,
+    ) {
+        let mut shadowed_keys = OrderSet::new();
+        self.infer_typed_dict_constructor_merged_unpacked_keyword_values(
+            typed_dict,
+            expr,
+            &mut shadowed_keys,
+        );
+    }
+
+    /// Walks a merged `**{...}` literal from right to left so overwrite semantics match runtime.
+    fn infer_typed_dict_constructor_merged_unpacked_keyword_values(
+        &mut self,
+        typed_dict: TypedDictType<'db>,
+        expr: &ast::Expr,
+        shadowed_keys: &mut OrderSet<Name>,
+    ) {
+        let items = typed_dict.items(self.db());
+
+        if let ast::Expr::Dict(dict_expr) = expr {
+            for item in dict_expr.items.iter().rev() {
+                if let Some(key_expr) = &item.key {
+                    let key_ty = self.get_or_infer_expression(key_expr, TypeContext::default());
+                    let value_tcx = if let Some(key) = key_ty
+                        .as_string_literal()
+                        .map(|key| Name::new(key.value(self.db())))
+                        && !shadowed_keys.contains(&key)
+                    {
+                        shadowed_keys.insert(key.clone());
+                        items
+                            .get(key.as_str())
+                            .map(|field| TypeContext::new(Some(field.declared_ty)))
+                            .unwrap_or_default()
+                    } else {
+                        TypeContext::default()
+                    };
+                    self.get_or_infer_expression(&item.value, value_tcx);
+                } else {
+                    if item.value.is_dict_expr() {
+                        self.infer_typed_dict_constructor_merged_unpacked_keyword_values(
+                            typed_dict,
+                            &item.value,
+                            shadowed_keys,
+                        );
+                    } else {
+                        let unpacked_ty =
+                            self.get_or_infer_expression(&item.value, TypeContext::default());
+                        if unpacked_ty.is_never() || unpacked_ty.is_dynamic() {
+                            shadowed_keys.extend(items.keys().cloned());
+                        } else if let Some(unpacked_keys) =
+                            extract_unpacked_typed_dict_keys(self.db(), unpacked_ty)
+                        {
+                            for (key, unpacked_key) in unpacked_keys {
+                                if unpacked_key.is_required() {
+                                    shadowed_keys.insert(key);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        self.get_or_infer_expression(expr, TypeContext::default());
     }
 
     /// Infer the key and value expressions of a positional dict literal passed to a
