@@ -781,8 +781,8 @@ const MAX_ITERATIONS: usize = 10;
 
 /// A convenient wrapper around [`check_path`], that additionally
 /// asserts that fixes converge after a fixed number of iterations.
-fn test_contents<'a>(
-    source_kind: &'a SourceKind,
+fn test_contents(
+    source_kind: &SourceKind,
     path: &Path,
     settings: &LinterSettings,
 ) -> Vec<Diagnostic> {
@@ -846,9 +846,8 @@ fn test_contents<'a>(
                 let output = print_diagnostics(messages);
 
                 panic!(
-                    "Failed to converge after {} iterations. This likely \
-                     indicates a bug in the implementation of the fix. Last diagnostics:\n{}",
-                    MAX_ITERATIONS, output
+                    "Failed to converge after {MAX_ITERATIONS} iterations. This likely \
+                     indicates a bug in the implementation of the fix. Last diagnostics:\n{output}"
                 );
             }
 
