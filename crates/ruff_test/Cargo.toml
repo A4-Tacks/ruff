@@ -17,8 +17,12 @@ doctest = false
 ruff_db = { workspace = true, features = ["os", "testing"] }
 ruff_diagnostics = { workspace = true }
 ruff_index = { workspace = true }
+ruff_linter = { workspace = true }
 ruff_notebook = { workspace = true }
 ruff_python_ast = { workspace = true }
+ruff_python_codegen = { workspace = true }
+ruff_python_index = { workspace = true }
+ruff_python_parser = { workspace = true }
 ruff_python_trivia = { workspace = true }
 ruff_source_file = { workspace = true }
 ruff_text_size = { workspace = true }
@@ -28,6 +32,7 @@ ty_static = { workspace = true }
 ty_vendored = { workspace = true }
 
 anyhow = { workspace = true }
+itertools = { workspace = true }
 camino = { workspace = true }
 colored = { workspace = true }
 dunce = { workspace = true }

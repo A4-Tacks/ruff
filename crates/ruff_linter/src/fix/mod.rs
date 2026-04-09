@@ -17,17 +17,17 @@ pub(crate) mod codemods;
 pub(crate) mod edits;
 pub(crate) mod snippet;
 
-pub(crate) struct FixResult {
+pub struct FixResult {
     /// The resulting source code, after applying all fixes.
-    pub(crate) code: String,
+    pub code: String,
     /// The number of fixes applied for each [`Rule`].
-    pub(crate) fixes: FixTable,
+    pub fixes: FixTable,
     /// Source map for the fixed source code.
-    pub(crate) source_map: SourceMap,
+    pub source_map: SourceMap,
 }
 
 /// Fix errors in a file, and write the fixed source code to disk.
-pub(crate) fn fix_file(
+pub fn fix_file(
     diagnostics: &[Diagnostic],
     locator: &Locator,
     unsafe_fixes: UnsafeFixes,

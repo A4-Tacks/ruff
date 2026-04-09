@@ -1,5 +1,10 @@
 # `non-pep695-generic-class` (`UP046`)
 
+```toml
+[environment]
+python-version = "3.12"
+```
+
 ```py
 from typing import Any, AnyStr, Generic, ParamSpec, TypeVar, TypeVarTuple
 
@@ -11,44 +16,44 @@ Ts = TypeVarTuple("Ts")
 P = ParamSpec("P")
 
 
-class A(Generic[T]):
+class A(Generic[T]):  # error: [non-pep695-generic-class]
     # Comments in a class body are preserved
     var: T
 
 
-class B(Generic[*Ts]):
+class B(Generic[*Ts]):  # error: [non-pep695-generic-class]
     var: tuple[*Ts]
 
 
-class C(Generic[P]):
+class C(Generic[P]):  # error: [non-pep695-generic-class]
     var: P
 
 
-class Constrained(Generic[S]):
+class Constrained(Generic[S]):  # error: [non-pep695-generic-class]
     var: S
 
 
 # This case gets a diagnostic but not a fix because we can't look up the bounds
 # or constraints on the TypeVar imported from another module
-class ExternalType(Generic[T, SupportsRichComparisonT]):
+class ExternalType(Generic[T, SupportsRichComparisonT]):  # error: [non-pep695-generic-class]
     var: T
     compare: SupportsRichComparisonT
 
 
 # typing.AnyStr is a common external type variable, so treat it specially as a
 # known TypeVar
-class MyStr(Generic[AnyStr]):
+class MyStr(Generic[AnyStr]):  # error: [non-pep695-generic-class]
     s: AnyStr
 
 
-class MultipleGenerics(Generic[S, T, *Ts, P]):
+class MultipleGenerics(Generic[S, T, *Ts, P]):  # error: [non-pep695-generic-class]
     var: S
     typ: T
     tup: tuple[*Ts]
     pep: P
 
 
-class MultipleBaseClasses(list, Generic[T]):
+class MultipleBaseClasses(list, Generic[T]):  # error: [non-pep695-generic-class]
     var: T
 
 
@@ -62,43 +67,43 @@ class Base2: ...
 class Base3: ...
 
 
-class MoreBaseClasses(Base1, Base2, Base3, Generic[T]):
+class MoreBaseClasses(Base1, Base2, Base3, Generic[T]):  # error: [non-pep695-generic-class]
     var: T
 
 
-class MultipleBaseAndGenerics(Base1, Base2, Base3, Generic[S, T, *Ts, P]):
+class MultipleBaseAndGenerics(Base1, Base2, Base3, Generic[S, T, *Ts, P]):  # error: [non-pep695-generic-class]
     var: S
     typ: T
     tup: tuple[*Ts]
     pep: P
 
 
-class A(Generic[T]): ...
+class A(Generic[T]): ...  # error: [non-pep695-generic-class]
 
 
-class B(A[S], Generic[S]):
+class B(A[S], Generic[S]):  # error: [non-pep695-generic-class]
     var: S
 
 
-class C(A[S], Generic[S, T]):
+class C(A[S], Generic[S, T]):  # error: [non-pep695-generic-class]
     var: tuple[S, T]
 
 
-class D(A[int], Generic[T]):
+class D(A[int], Generic[T]):  # error: [non-pep695-generic-class]
     var: T
 
 
-class NotLast(Generic[T], Base1):
+class NotLast(Generic[T], Base1):  # error: [non-pep695-generic-class]
     var: T
 
 
-class Sandwich(Base1, Generic[T], Base2):
+class Sandwich(Base1, Generic[T], Base2):  # error: [non-pep695-generic-class]
     var: T
 
 
 # runtime `TypeError` to inherit from `Generic` multiple times, but we still
 # emit a diagnostic
-class TooManyGenerics(Generic[T], Generic[S]):
+class TooManyGenerics(Generic[T], Generic[S]):  # error: [non-pep695-generic-class]
     var: T
     var: S
 

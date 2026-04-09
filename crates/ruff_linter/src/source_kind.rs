@@ -86,7 +86,7 @@ impl SourceKind {
     }
 
     #[must_use]
-    pub(crate) fn updated(&self, new_source: String, source_map: &SourceMap) -> Self {
+    pub fn updated(&self, new_source: String, source_map: &SourceMap) -> Self {
         match self {
             SourceKind::IpyNotebook(notebook) => {
                 let mut cloned = notebook.clone();

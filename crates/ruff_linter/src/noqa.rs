@@ -1190,7 +1190,7 @@ impl NoqaMapping {
     }
 
     /// Returns the re-mapped position or `position` if no mapping exists.
-    pub(crate) fn resolve(&self, offset: TextSize) -> TextSize {
+    pub fn resolve(&self, offset: TextSize) -> TextSize {
         let index = self.ranges.binary_search_by(|range| {
             if range.end() < offset {
                 std::cmp::Ordering::Less

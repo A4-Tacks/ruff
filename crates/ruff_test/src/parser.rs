@@ -147,10 +147,6 @@ impl<'m, 's> MarkdownTest<'m, 's> {
             .has_directive_set(MdtestDirective::SnapshotDiagnostics)
     }
 
-    pub(super) fn should_expect_panic(&self) -> Result<Option<&str>, ()> {
-        self.section.directives.get(MdtestDirective::ExpectPanic)
-    }
-
     pub(super) fn should_skip_pulling_types(&self) -> bool {
         self.section
             .directives
@@ -934,13 +930,6 @@ pub(crate) struct MdtestDirectives {
 impl MdtestDirectives {
     fn has_directive_set(&self, directive: MdtestDirective) -> bool {
         self.directives.contains_key(&directive)
-    }
-
-    fn get(&self, directive: MdtestDirective) -> Result<Option<&str>, ()> {
-        self.directives
-            .get(&directive)
-            .map(|s| s.as_deref())
-            .ok_or(())
     }
 
     fn add_directive(&mut self, directive: MdtestDirective, value: Option<String>) {

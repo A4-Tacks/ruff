@@ -26,7 +26,7 @@ mod cst;
 pub mod directives;
 mod doc_lines;
 mod docstrings;
-mod fix;
+pub mod fix;
 pub mod fs;
 mod importer;
 pub mod line_width;
