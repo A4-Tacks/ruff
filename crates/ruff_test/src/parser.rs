@@ -146,12 +146,6 @@ impl<'m, 's> MarkdownTest<'m, 's> {
             .directives
             .has_directive_set(MdtestDirective::SnapshotDiagnostics)
     }
-
-    pub(super) fn should_skip_pulling_types(&self) -> bool {
-        self.section
-            .directives
-            .has_directive_set(MdtestDirective::PullTypesSkip)
-    }
 }
 
 /// Iterator yielding all [`MarkdownTest`]s in a [`MarkdownTestSuite`].
