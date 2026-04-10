@@ -5,7 +5,7 @@ use ruff_db::{
     source::source_text,
 };
 use ruff_diagnostics::{Edit, Fix};
-use ruff_python_ast as ast;
+use ruff_python_ast::{self as ast, name::Name};
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use rustc_hash::FxHashMap;
 
@@ -17,9 +17,9 @@ use crate::{
         SemanticIndex, attribute_assignments, definition::DefinitionKind, scope::ScopeId,
     },
     types::{
-        CallArguments, ClassBase, ClassLiteral, ClassType, GenericAlias, KnownInstanceType,
-        MemberLookupPolicy, MetaclassCandidate, Parameters, Signature, SpecialFormType,
-        StaticClassLiteral, Type,
+        CallArguments, ClassBase, ClassLiteral, ClassType, GenericAlias, KnownClass,
+        KnownInstanceType, MemberLookupPolicy, MetaclassCandidate, Parameters, Signature,
+        SpecialFormType, StaticClassLiteral, Type,
         call::{Argument, CallError},
         class::{AbstractMethod, CodeGeneratorKind, FieldKind, MetaclassErrorKind},
         context::InferContext,
@@ -716,39 +716,13 @@ pub(crate) fn check_static_class_definitions<'db>(
                 }
             }
         } else {
-            let call_args: CallArguments = args
-                .keywords
-                .iter()
-                .filter_map(|keyword| match keyword.arg.as_ref() {
-                    // We mimic the runtime behaviour and discard the metaclass argument
-                    Some(name) if name.id.as_str() == "metaclass" => None,
-                    Some(name) => {
-                        let ty = file_expression_type(&keyword.value);
-                        Some((Argument::Keyword(name.id.as_str()), Some(ty)))
-                    }
-                    None => {
-                        let ty = file_expression_type(&keyword.value);
-                        Some((Argument::Keywords, Some(ty)))
-                    }
-                })
-                .collect();
-
-            let init_subclass_type = class
-                .class_member_from_mro(
-                    db,
-                    "__init_subclass__",
-                    MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
-                    // skip(1) to skip the current class and only consider base classes.
-                    class.iter_mro(db, None).skip(1),
-                )
-                .ignore_possibly_undefined();
-
-            if let Some(init_subclass) = init_subclass_type {
-                let call_args = call_args.with_self(Some(Type::from(class)));
-                if let Err(CallError(_, bindings)) = init_subclass.try_call(db, &call_args) {
-                    bindings.report_diagnostics(context, class_node.into());
-                }
-            }
+            check_non_typeddict_keyword_arguments(
+                context,
+                class,
+                class_node,
+                &args.keywords,
+                file_expression_type,
+            );
         }
     }
 
@@ -1236,4 +1210,130 @@ fn has_binding_in_init<'db>(
                 .into_iter()
                 .any(|b| b.binding.definition().is_some())
     })
+}
+
+fn check_non_typeddict_keyword_arguments<'db>(
+    context: &InferContext<'db, '_>,
+    class: StaticClassLiteral<'db>,
+    class_node: &ast::StmtClassDef,
+    keywords: &[ast::Keyword],
+    file_expression_type: &impl Fn(&ast::Expr) -> Type<'db>,
+) {
+    let db = context.db();
+
+    let keyword_call_args: CallArguments = keywords
+        .iter()
+        .filter_map(|keyword| match keyword.arg.as_deref() {
+            // We mimic the runtime behaviour and discard the metaclass argument
+            Some("metaclass") => None,
+            Some(name) => {
+                let ty = file_expression_type(&keyword.value);
+                Some((Argument::Keyword(name), Some(ty)))
+            }
+            None => {
+                let ty = file_expression_type(&keyword.value);
+                Some((Argument::Keywords, Some(ty)))
+            }
+        })
+        .collect();
+
+    let metaclass = class.metaclass(db);
+    let builtins_type = KnownClass::Type.to_class_literal(db);
+
+    let overrides_member = |typ: Type<'db>, member| {
+        !typ.member_lookup_with_policy(
+            db,
+            Name::new_static(member),
+            MemberLookupPolicy::META_CLASS_NO_TYPE_FALLBACK
+                | MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
+        )
+        .is_undefined()
+    };
+
+    // Any class statement is syntactic sugar at runtime for a constructor call to the class's metaclass.
+    // As an optimisation, however, we avoid desugaring the `class` statement into a call to the metaclass
+    // unless:
+    //
+    // (1) The metaclass is not `builtins.type`, and;
+    // (2) Either the metaclass is not a subclass of `builtins.type`, or one of the following conditions applies:
+    //     (a) The metaclass overrides `__new__` from `builtins.type`, or
+    //     (b) The metaclass overrides `__prepare__` from `builtins.type`, or
+    //     (c) The metaclass overrides `__init__` from `builtins.type`, or
+    //     (d) The metaclass itself has its own custom metaclass that:
+    //         (i) is not `builtins.type`, and;
+    //         (ii) either is not a subclass of `builtins.type` or overrides `__call__` from `builtins.type`.
+    let (check_call_to_metaclass, check_init_subclass) = if metaclass == builtins_type {
+        (false, true)
+    } else if !metaclass.is_subtype_of(db, KnownClass::Type.to_subclass_of(db))
+        || overrides_member(metaclass, "__new__")
+    {
+        (true, false)
+    } else {
+        let meta_metaclass = metaclass.to_meta_type(db);
+        if meta_metaclass != builtins_type
+            && (!meta_metaclass.is_subtype_of(db, KnownClass::Type.to_subclass_of(db))
+                || overrides_member(meta_metaclass, "__call__"))
+        {
+            (true, false)
+        } else if overrides_member(metaclass, "__prepare__")
+            || overrides_member(metaclass, "__init__")
+        {
+            (true, true)
+        } else {
+            (false, true)
+        }
+    };
+
+    if check_call_to_metaclass {
+        let str = KnownClass::Str.to_instance(db);
+        let bases_type = Type::homogeneous_tuple(db, KnownClass::Type.to_instance(db));
+
+        let namespace_type = metaclass
+            .member_lookup_with_policy(
+                db,
+                Name::new_static("__prepare__"),
+                MemberLookupPolicy::META_CLASS_NO_TYPE_FALLBACK,
+            )
+            .ignore_possibly_undefined()
+            .map(|prepare| {
+                let prepare_args = keyword_call_args.with_prepended_parameters(&[str, bases_type]);
+
+                prepare
+                    .try_call(db, &prepare_args)
+                    .unwrap_or_else(|CallError(_, bindings)| {
+                        bindings.report_diagnostics(context, class_node.into());
+                        *bindings
+                    })
+                    .return_type(db)
+            })
+            .unwrap_or_else(|| KnownClass::Dict.to_specialized_instance(db, &[str, Type::any()]));
+
+        let metaclass_new_prepended_parameters = &[str, bases_type, namespace_type];
+
+        let metaclass_new_args =
+            keyword_call_args.with_prepended_parameters(metaclass_new_prepended_parameters);
+
+        if let Err(CallError(_, bindings)) = metaclass.try_call(db, &metaclass_new_args) {
+            bindings.report_diagnostics(context, class_node.into());
+        }
+    }
+
+    if check_init_subclass {
+        let init_subclass = class.class_member_from_mro(
+            db,
+            "__init_subclass__",
+            MemberLookupPolicy::default(),
+            // skip(1) to skip the current class and only consider base classes.
+            class.iter_mro(db, None).skip(1),
+        );
+
+        // This should generally always be `Some()`, since `object.__init_subclass__` exists...
+        // but there's always the chance that the user is employing a custom typeshed.
+        if let Some(init_subclass) = init_subclass.ignore_possibly_undefined() {
+            let args = keyword_call_args.with_self(Some(Type::from(class)));
+            if let Err(CallError(_, bindings)) = init_subclass.try_call(db, &args) {
+                bindings.report_diagnostics(context, class_node.into());
+            }
+        }
+    }
 }

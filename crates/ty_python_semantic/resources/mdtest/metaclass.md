@@ -557,9 +557,10 @@ arguments as `type.__new__`) isn't a valid metaclass.
 
 ```py
 class M: ...
+
+# error: [too-many-positional-arguments] "Too many positional arguments to bound method `__init__`: expected 1, got 4"
 class A(metaclass=M): ...
 
-# TODO: emit a diagnostic for the invalid metaclass
 reveal_type(A.__class__)  # revealed: <class 'M'>
 ```
 
@@ -711,6 +712,12 @@ When a class has an explicit `metaclass` that is not a class, but is a callable 
 def f(*args, **kwargs) -> int:
     return 1
 
+# TODO: this error is incorrect, and comes as a result of the next TODO:
+# we still consider the symbol `A` as having type `<class 'A'>`
+# even though calling the metaclass returns `int` rather than a
+# class-literal type.
+#
+# error: [no-matching-overload] "No overload of function `__new__` matches arguments"
 class A(metaclass=f): ...
 
 # TODO: Should be `int`
@@ -735,7 +742,7 @@ def _(flag: bool):
 
 class SignatureMismatch: ...
 
-# TODO: Emit a diagnostic
+# error: [too-many-positional-arguments] "Too many positional arguments to bound method `__init__`: expected 1, got 4"
 class D(metaclass=SignatureMismatch): ...
 
 # TODO: Should be `Unknown`
