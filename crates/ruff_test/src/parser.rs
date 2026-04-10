@@ -5,11 +5,11 @@ use std::{
     hash::Hash,
 };
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use ruff_db::system::{SystemPath, SystemPathBuf};
+use ruff_workspace::options::Options;
 use rustc_hash::FxHashMap;
 
-use crate::config::MarkdownTestConfig;
 use ruff_index::{IndexVec, newtype_index};
 use ruff_python_ast::PySourceType;
 use ruff_python_trivia::Cursor;
@@ -137,7 +137,7 @@ impl<'m, 's> MarkdownTest<'m, 's> {
         self.files.iter()
     }
 
-    pub(crate) fn configuration(&self) -> &MarkdownTestConfig {
+    pub(crate) fn configuration(&self) -> &Options {
         &self.section.config
     }
 
@@ -200,7 +200,7 @@ struct Section<'s> {
     title: &'s str,
     level: u8,
     parent_id: Option<SectionId>,
-    config: MarkdownTestConfig,
+    config: Options,
     directives: MdtestDirectives,
 }
 
@@ -441,10 +441,6 @@ struct Parser<'s> {
 
     /// Whether or not the current section has a config block.
     current_section_has_config: bool,
-
-    /// Whether or not any section in the file has external dependencies.
-    /// Only one section per file is allowed to have dependencies (for lockfile support).
-    file_has_dependencies: bool,
 }
 
 impl<'s> Parser<'s> {
@@ -454,7 +450,7 @@ impl<'s> Parser<'s> {
             title,
             level: 0,
             parent_id: None,
-            config: MarkdownTestConfig::default(),
+            config: Options::default(),
             directives: MdtestDirectives::default(),
         });
         Self {
@@ -467,7 +463,6 @@ impl<'s> Parser<'s> {
             stack: SectionStack::new(root_section_id),
             current_section_files: FxHashMap::default(),
             current_section_has_config: false,
-            file_has_dependencies: false,
         }
     }
 
@@ -837,17 +832,8 @@ impl<'s> Parser<'s> {
             bail!("Multiple TOML configuration blocks in the same section are not allowed.");
         }
 
-        let config = MarkdownTestConfig::from_str(code)?;
-
-        if config.dependencies().is_some() {
-            if self.file_has_dependencies {
-                bail!(
-                    "Multiple sections with `[project]` dependencies in the same file are not allowed. \
-                     External dependencies must be specified in a single top-level configuration block."
-                );
-            }
-            self.file_has_dependencies = true;
-        }
+        let config: Options =
+            toml::from_str(code).context("Error while parsing Markdown TOML config")?;
 
         let current_section = &mut self.sections[self.stack.top()];
         current_section.config = config;

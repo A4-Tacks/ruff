@@ -1,22 +1,17 @@
-use camino::{Utf8Component, Utf8PathBuf};
 use ruff_db::Db as SourceDb;
 use ruff_db::diagnostic::Severity;
 use ruff_db::files::{File, Files};
 use ruff_db::system::{
-    CaseSensitivity, DbWithWritableSystem, InMemorySystem, OsSystem, System, SystemPath,
-    SystemPathBuf, WhichResult, WritableSystem,
+    CaseSensitivity, DbWithWritableSystem, InMemorySystem, System, SystemPath, SystemPathBuf,
+    WhichResult, WritableSystem,
 };
 use ruff_db::vendored::VendoredFileSystem;
 use ruff_notebook::{Notebook, NotebookError};
-use salsa::Setter as _;
 use std::borrow::Cow;
 use std::sync::Arc;
-use tempfile::TempDir;
-use ty_module_resolver::{ModuleGlobSetBuilder, SearchPaths};
+use ty_module_resolver::SearchPaths;
 use ty_python_semantic::lint::{LintRegistry, RuleSelection};
 use ty_python_semantic::{AnalysisSettings, Db as SemanticDb, Program, default_lint_registry};
-
-use crate::config::Analysis;
 
 #[salsa::db]
 #[derive(Clone)]
@@ -52,68 +47,6 @@ impl Db {
 
     fn settings(&self) -> Settings {
         self.settings.unwrap()
-    }
-
-    pub(crate) fn set_verbosity(&mut self, verbose: bool) {
-        self.settings().set_verbose(self).to(verbose);
-    }
-
-    pub(crate) fn update_analysis_options(&mut self, options: Option<&Analysis>) {
-        let analysis = if let Some(options) = options {
-            let AnalysisSettings {
-                respect_type_ignore_comments: respect_type_ignore_comments_default,
-                allowed_unresolved_imports: allowed_unresolved_imports_default,
-                replace_imports_with_any: replace_imports_with_any_default,
-            } = AnalysisSettings::default();
-
-            let allowed_unresolved_imports = if let Some(allowed_unresolved_imports) =
-                options.allowed_unresolved_imports.as_deref()
-            {
-                let mut builder = ModuleGlobSetBuilder::new();
-                for pattern in allowed_unresolved_imports {
-                    builder
-                        .add(pattern)
-                        .expect("Invalid `allowed-unresolved-imports` pattern `{pattern}");
-                }
-                builder.build().unwrap()
-            } else {
-                allowed_unresolved_imports_default
-            };
-
-            let replace_imports_with_any = if let Some(replace_imports_with_any) =
-                options.replace_imports_with_any.as_deref()
-            {
-                let mut builder = ModuleGlobSetBuilder::new();
-                for pattern in replace_imports_with_any {
-                    builder
-                        .add(pattern)
-                        .expect("Invalid `replace-imports-with-any` pattern `{pattern}");
-                }
-                builder.build().unwrap()
-            } else {
-                replace_imports_with_any_default
-            };
-
-            AnalysisSettings {
-                respect_type_ignore_comments: options
-                    .respect_type_ignore_comments
-                    .unwrap_or(respect_type_ignore_comments_default),
-                allowed_unresolved_imports,
-                replace_imports_with_any,
-            }
-        } else {
-            AnalysisSettings::default()
-        };
-
-        let settings = self.settings();
-        if settings.analysis(self) != &analysis {
-            settings.set_analysis(self).to(analysis);
-        }
-    }
-
-    pub(crate) fn use_os_system_with_temp_dir(&mut self, cwd: SystemPathBuf, temp_dir: TempDir) {
-        self.system.with_os(cwd, temp_dir);
-        Files::sync_all(self);
     }
 
     pub(crate) fn use_in_memory_system(&mut self) {
@@ -200,10 +133,6 @@ pub(crate) struct MdtestSystem(Arc<MdtestSystemInner>);
 #[derive(Debug)]
 enum MdtestSystemInner {
     InMemory(InMemorySystem),
-    Os {
-        os_system: OsSystem,
-        _temp_dir: TempDir,
-    },
 }
 
 impl MdtestSystem {
@@ -216,42 +145,17 @@ impl MdtestSystem {
     fn as_system(&self) -> &dyn WritableSystem {
         match &*self.0 {
             MdtestSystemInner::InMemory(system) => system,
-            MdtestSystemInner::Os { os_system, .. } => os_system,
         }
-    }
-
-    fn with_os(&mut self, cwd: SystemPathBuf, temp_dir: TempDir) {
-        self.0 = Arc::new(MdtestSystemInner::Os {
-            os_system: OsSystem::new(cwd),
-            _temp_dir: temp_dir,
-        });
     }
 
     fn with_in_memory(&mut self) {
-        if let MdtestSystemInner::InMemory(in_memory) = &*self.0 {
-            in_memory.fs().remove_all();
-        } else {
-            self.0 = Arc::new(MdtestSystemInner::InMemory(InMemorySystem::default()));
-        }
+        let MdtestSystemInner::InMemory(in_memory) = &*self.0;
+        in_memory.fs().remove_all();
     }
 
     fn normalize_path<'a>(&self, path: &'a SystemPath) -> Cow<'a, SystemPath> {
         match &*self.0 {
             MdtestSystemInner::InMemory(_) => Cow::Borrowed(path),
-            MdtestSystemInner::Os { os_system, .. } => {
-                // Make all paths relative to the current directory
-                // to avoid writing or reading from outside the temp directory.
-                let without_root: Utf8PathBuf = path
-                    .components()
-                    .skip_while(|component| {
-                        matches!(
-                            component,
-                            Utf8Component::RootDir | Utf8Component::Prefix(..)
-                        )
-                    })
-                    .collect();
-                Cow::Owned(os_system.current_directory().join(&without_root))
-            }
         }
     }
 }
@@ -269,15 +173,7 @@ impl System for MdtestSystem {
             .as_system()
             .canonicalize_path(&self.normalize_path(path))?;
 
-        if let MdtestSystemInner::Os { os_system, .. } = &*self.0 {
-            // Make the path relative to the current directory
-            Ok(canonicalized
-                .strip_prefix(os_system.current_directory())
-                .unwrap()
-                .to_owned())
-        } else {
-            Ok(canonicalized)
-        }
+        Ok(canonicalized)
     }
 
     fn read_to_string(&self, path: &SystemPath) -> ruff_db::system::Result<String> {

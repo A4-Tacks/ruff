@@ -3,8 +3,8 @@
 <!-- snapshot-diagnostics -->
 
 ```toml
-[environment]
-python-version = "3.12"
+target-version = "py312"
+lint.select = ["UP046"]
 ```
 
 ```py

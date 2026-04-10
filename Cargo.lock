@@ -3537,6 +3537,7 @@ dependencies = [
  "ruff_python_trivia",
  "ruff_source_file",
  "ruff_text_size",
+ "ruff_workspace",
  "rustc-hash",
  "rustc-stable-hash",
  "salsa",
