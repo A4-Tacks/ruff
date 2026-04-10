@@ -1,51 +1,37 @@
-use crate::parser::{BacktickOffsets, EmbeddedFileSourceMap};
+use std::fmt::{Display, Write};
+
 use anyhow::anyhow;
 use camino::Utf8Path;
 use colored::Colorize;
-use itertools::Itertools;
-use parser as test_parser;
+use rustc_hash::FxHashMap;
+
 use ruff_db::Db as _;
-use ruff_db::diagnostic::{
-    Diagnostic, DiagnosticFormat, DisplayDiagnosticConfig, DisplayDiagnostics, Span,
-};
+use ruff_db::diagnostic::{Diagnostic, DisplayDiagnosticConfig};
 use ruff_db::files::{File, FileRootKind, system_path_to_file};
 use ruff_db::source::source_text;
 use ruff_db::system::{DbWithWritableSystem as _, SystemPathBuf};
 use ruff_diagnostics::Applicability;
-use ruff_linter::codes::Rule;
-use ruff_linter::fix::{FixResult, fix_file};
-use ruff_linter::linter::check_path;
 use ruff_linter::message::EmitterContext;
-use ruff_linter::package::PackageRoot;
-use ruff_linter::packaging::detect_package_root;
-use ruff_linter::settings::types::UnsafeFixes;
-use ruff_linter::settings::{LinterSettings, flags};
 use ruff_linter::source_kind::SourceKind;
-use ruff_linter::suppression::Suppressions;
-use ruff_linter::{FixAvailability, Locator, directives};
-use ruff_python_ast::{PySourceType, PythonVersion};
-use ruff_python_codegen::Stylist;
-use ruff_python_index::Indexer;
-use ruff_python_parser::{ParseError, ParseOptions};
-use ruff_source_file::{LineIndex, OneIndexed, SourceFileBuilder};
+use ruff_linter::test::test_contents;
+use ruff_python_ast::PythonVersion;
+use ruff_source_file::{LineIndex, OneIndexed};
 use ruff_workspace::configuration::Configuration;
-use rustc_hash::FxHashMap;
-use std::borrow::Cow;
-use std::fmt::{Display, Write};
-use std::path::Path;
 use ty_module_resolver::SearchPathSettings;
 use ty_python_semantic::{
     FallibleStrategy, Program, ProgramSettings, PythonPlatform, PythonVersionSource,
     PythonVersionWithSource,
 };
+use ty_static::EnvVars;
+
+use crate::parser::{BacktickOffsets, EmbeddedFileSourceMap};
+use parser as test_parser;
 
 mod assertion;
 mod db;
 mod diagnostic;
 mod matcher;
 mod parser;
-
-use ty_static::EnvVars;
 
 /// Run `path` as a markdown test suite with given `title`.
 ///
@@ -298,7 +284,7 @@ fn run_test(
                 .as_system_path()
                 .expect("mdtest files are on the system")
                 .as_std_path();
-            let mut diagnostics = test_contents(&source_kind, path, &settings.linter);
+            let mut diagnostics = test_contents(&source_kind, path, &settings.linter).0;
 
             diagnostics.sort_by(|left, right| {
                 left.rendering_sort_key(db)
@@ -419,245 +405,4 @@ fn create_diagnostic_snapshot(
         writeln!(snapshot, "```").unwrap();
     }
     snapshot
-}
-
-const MAX_ITERATIONS: usize = 10;
-
-/// A convenient wrapper around [`check_path`], that additionally
-/// asserts that fixes converge after a fixed number of iterations.
-fn test_contents(
-    source_kind: &SourceKind,
-    path: &Path,
-    settings: &LinterSettings,
-) -> Vec<Diagnostic> {
-    let source_type = PySourceType::from(path);
-    let target_version = settings.resolve_target_version(path);
-    let options =
-        ParseOptions::from(source_type).with_target_version(target_version.parser_version());
-    let parsed = ruff_python_parser::parse_unchecked(source_kind.source_code(), options.clone())
-        .try_into_module()
-        .expect("PySourceType always parses into a module");
-    let locator = Locator::new(source_kind.source_code());
-    let stylist = Stylist::from_tokens(parsed.tokens(), locator.contents());
-    let indexer = Indexer::from_tokens(parsed.tokens(), locator.contents());
-    let directives = directives::extract_directives(
-        parsed.tokens(),
-        directives::Flags::from_settings(settings),
-        &locator,
-        &indexer,
-    );
-    let suppressions = Suppressions::from_tokens(locator.contents(), parsed.tokens(), &indexer);
-    let messages = check_path(
-        path,
-        path.parent()
-            .and_then(|parent| detect_package_root(parent, &settings.namespace_packages))
-            .map(|path| PackageRoot::Root { path }),
-        &locator,
-        &stylist,
-        &indexer,
-        &directives,
-        settings,
-        flags::Noqa::Enabled,
-        source_kind,
-        source_type,
-        &parsed,
-        target_version,
-        &suppressions,
-    );
-
-    let source_has_errors = parsed.has_invalid_syntax();
-
-    // Detect fixes that don't converge after multiple iterations.
-    let mut iterations = 0;
-
-    let mut transformed = Cow::Borrowed(source_kind);
-
-    if messages.iter().any(|message| message.fix().is_some()) {
-        let mut messages = messages.clone();
-
-        while let Some(FixResult {
-            code: fixed_contents,
-            source_map,
-            ..
-        }) = fix_file(
-            &messages,
-            &Locator::new(transformed.source_code()),
-            UnsafeFixes::Enabled,
-        ) {
-            if iterations < MAX_ITERATIONS {
-                iterations += 1;
-            } else {
-                let output = print_diagnostics(messages);
-
-                panic!(
-                    "Failed to converge after {MAX_ITERATIONS} iterations. This likely \
-                     indicates a bug in the implementation of the fix. Last diagnostics:\n{output}"
-                );
-            }
-
-            transformed = Cow::Owned(transformed.updated(fixed_contents, &source_map));
-
-            let parsed =
-                ruff_python_parser::parse_unchecked(transformed.source_code(), options.clone())
-                    .try_into_module()
-                    .expect("PySourceType always parses into a module");
-            let locator = Locator::new(transformed.source_code());
-            let stylist = Stylist::from_tokens(parsed.tokens(), locator.contents());
-            let indexer = Indexer::from_tokens(parsed.tokens(), locator.contents());
-            let directives = directives::extract_directives(
-                parsed.tokens(),
-                directives::Flags::from_settings(settings),
-                &locator,
-                &indexer,
-            );
-
-            let suppressions =
-                Suppressions::from_tokens(locator.contents(), parsed.tokens(), &indexer);
-            let fixed_messages = check_path(
-                path,
-                None,
-                &locator,
-                &stylist,
-                &indexer,
-                &directives,
-                settings,
-                flags::Noqa::Enabled,
-                &transformed,
-                source_type,
-                &parsed,
-                target_version,
-                &suppressions,
-            );
-
-            if parsed.has_invalid_syntax() && !source_has_errors {
-                // Previous fix introduced a syntax error, abort
-                let fixes = print_diagnostics(messages);
-                let syntax_errors = print_syntax_errors(parsed.errors(), path, &transformed);
-
-                panic!(
-                    "Fixed source has a syntax error where the source document does not. This is a bug in one of the generated fixes:
-{syntax_errors}
-Last generated fixes:
-{fixes}
-Source with applied fixes:
-{}",
-                    transformed.source_code()
-                );
-            }
-
-            messages = fixed_messages;
-        }
-    }
-
-    let source_code = SourceFileBuilder::new(
-        path.file_name().unwrap().to_string_lossy().as_ref(),
-        source_kind.source_code(),
-    )
-    .finish();
-
-    messages
-        .into_iter()
-        .filter_map(|msg| Some((msg.secondary_code()?.to_string(), msg)))
-        .map(|(code, mut diagnostic)| {
-            let rule = Rule::from_code(&code).unwrap();
-            let fixable = diagnostic.fix().is_some_and(|fix| {
-                matches!(
-                    fix.applicability(),
-                    Applicability::Safe | Applicability::Unsafe
-                )
-            });
-
-            match (fixable, rule.fixable()) {
-                (true, FixAvailability::Sometimes | FixAvailability::Always)
-                | (false, FixAvailability::None | FixAvailability::Sometimes) => {
-                    // Ok
-                }
-                (true, FixAvailability::None) => {
-                    panic!(
-                        "Rule {rule:?} is marked as non-fixable but it created a fix.
-Change the `Violation::FIX_AVAILABILITY` to either \
-`FixAvailability::Sometimes` or `FixAvailability::Always`"
-                    );
-                }
-                (false, FixAvailability::Always) if source_has_errors => {
-                    // Ok
-                }
-                (false, FixAvailability::Always) => {
-                    panic!(
-                        "\
-Rule {rule:?} is marked to always-fixable but the diagnostic has no fix.
-Either ensure you always emit a fix or change `Violation::FIX_AVAILABILITY` to either \
-`FixAvailability::Sometimes` or `FixAvailability::None`"
-                    )
-                }
-            }
-
-            assert!(
-                !(fixable && diagnostic.first_help_text().is_none()),
-                "Diagnostic emitted by {rule:?} is fixable but \
-                `Violation::fix_title` returns `None`"
-            );
-
-            // Not strictly necessary but adds some coverage for this code path by overriding the
-            // noqa offset and the source file
-            if let Some(range) = diagnostic.range() {
-                diagnostic.set_noqa_offset(directives.noqa_line_for.resolve(range.start()));
-            }
-            // This part actually is necessary to avoid long relative paths in snapshots.
-            for annotation in diagnostic.annotations_mut() {
-                if let Some(range) = annotation.get_span().range() {
-                    annotation.set_span(Span::from(source_code.clone()).with_range(range));
-                }
-            }
-            for sub in diagnostic.sub_diagnostics_mut() {
-                for annotation in sub.annotations_mut() {
-                    if let Some(range) = annotation.get_span().range() {
-                        annotation.set_span(Span::from(source_code.clone()).with_range(range));
-                    }
-                }
-            }
-
-            diagnostic
-        })
-        .chain(parsed.errors().iter().map(|parse_error| {
-            Diagnostic::invalid_syntax(source_code.clone(), &parse_error.error, parse_error)
-        }))
-        .sorted_by(Diagnostic::ruff_start_ordering)
-        .collect()
-}
-
-fn print_syntax_errors(errors: &[ParseError], path: &Path, source: &SourceKind) -> String {
-    let filename = path.file_name().unwrap().to_string_lossy();
-    let source_file = SourceFileBuilder::new(filename.as_ref(), source.source_code()).finish();
-
-    let messages: Vec<_> = errors
-        .iter()
-        .map(|parse_error| {
-            Diagnostic::invalid_syntax(source_file.clone(), &parse_error.error, parse_error)
-        })
-        .collect();
-
-    print_messages(&messages)
-}
-
-/// Print the lint diagnostics in `diagnostics`.
-fn print_diagnostics(mut diagnostics: Vec<Diagnostic>) -> String {
-    diagnostics.retain(|msg| !msg.is_invalid_syntax());
-    print_messages(&diagnostics)
-}
-
-pub(crate) fn print_messages(diagnostics: &[Diagnostic]) -> String {
-    let config = DisplayDiagnosticConfig::new("ruff")
-        .format(DiagnosticFormat::Full)
-        .hide_severity(true)
-        .with_show_fix_status(true)
-        .show_fix_diff(true)
-        .with_fix_applicability(Applicability::DisplayOnly);
-
-    DisplayDiagnostics::new(
-        &EmitterContext::new(&FxHashMap::default()),
-        &config,
-        diagnostics,
-    )
-    .to_string()
 }
