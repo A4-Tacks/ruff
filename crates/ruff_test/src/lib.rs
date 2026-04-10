@@ -13,7 +13,6 @@ use ruff_db::diagnostic::{
 };
 use ruff_db::files::{File, FileRootKind, system_path_to_file};
 use ruff_db::panic::{PanicError, catch_unwind};
-use ruff_db::parsed::parsed_module;
 use ruff_db::source::source_text;
 use ruff_db::system::{DbWithWritableSystem as _, SystemPath, SystemPathBuf};
 use ruff_db::testing::{setup_logging, setup_logging_with_filter};
@@ -499,21 +498,6 @@ fn run_test(
     let mut failures: Failures = test_files
         .iter()
         .filter_map(|test_file| {
-            let parsed = parsed_module(db, test_file.file).load(db);
-
-            let mut diagnostics: Vec<Diagnostic> = parsed
-                .errors()
-                .iter()
-                .map(|error| Diagnostic::invalid_syntax(test_file.file, &error.error, error))
-                .collect();
-
-            diagnostics.extend(
-                parsed
-                    .unsupported_syntax_errors()
-                    .iter()
-                    .map(|error| Diagnostic::invalid_syntax(test_file.file, error, error)),
-            );
-
             let source_kind = SourceKind::Python {
                 code: source_text(db, test_file.file).as_str().to_string(),
                 is_stub: test_file.file.is_stub(db),
@@ -526,9 +510,8 @@ fn run_test(
                 .as_std_path();
             // TODO don't hard-code the rule
             let settings = LinterSettings::for_rule(Rule::NonPEP695GenericClass);
-            let type_diagnostics = test_contents(&source_kind, path, &settings);
+            let mut diagnostics = test_contents(&source_kind, path, &settings);
 
-            diagnostics.extend(type_diagnostics);
             diagnostics.sort_by(|left, right| {
                 left.rendering_sort_key(db)
                     .cmp(&right.rendering_sort_key(db))
@@ -597,7 +580,7 @@ fn run_test(
         );
     } else if !snapshot_diagnostics.is_empty() {
         let snapshot =
-            create_diagnostic_snapshot(db, relative_fixture_path, test, snapshot_diagnostics);
+            create_diagnostic_snapshot(relative_fixture_path, test, snapshot_diagnostics);
         let name = test.name().replace(' ', "_").replace(':', "__");
         insta::with_settings!(
             {
@@ -725,15 +708,16 @@ struct TestFile {
 }
 
 fn create_diagnostic_snapshot(
-    db: &mut db::Db,
     relative_fixture_path: &Utf8Path,
     test: &parser::MarkdownTest,
     diagnostics: impl IntoIterator<Item = Diagnostic>,
 ) -> String {
-    let display_config = DisplayDiagnosticConfig::new("ty")
+    let display_config = DisplayDiagnosticConfig::new("ruff")
         .color(false)
         .show_fix_diff(true)
         .with_fix_applicability(Applicability::DisplayOnly);
+    let notebook_indexes = FxHashMap::default();
+    let resolver = EmitterContext::new(&notebook_indexes);
 
     let mut snapshot = String::new();
     writeln!(snapshot).unwrap();
@@ -771,7 +755,7 @@ fn create_diagnostic_snapshot(
             writeln!(snapshot).unwrap();
         }
         writeln!(snapshot, "```").unwrap();
-        write!(snapshot, "{}", diag.display(db, &display_config)).unwrap();
+        write!(snapshot, "{}", diag.display(&resolver, &display_config)).unwrap();
         writeln!(snapshot, "```").unwrap();
     }
     snapshot

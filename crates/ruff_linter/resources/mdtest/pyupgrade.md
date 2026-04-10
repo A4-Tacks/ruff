@@ -1,5 +1,7 @@
 # `non-pep695-generic-class` (`UP046`)
 
+<!-- snapshot-diagnostics -->
+
 ```toml
 [environment]
 python-version = "3.12"
