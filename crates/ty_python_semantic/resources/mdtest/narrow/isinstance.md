@@ -737,8 +737,13 @@ from ty_extensions import TypedDictTop
 
 type Alias = TypedDictTop
 
+def sink(x: object) -> None: ...
 def takes_typed_dict_top(value: TypedDictTop):
     reveal_type(value)  # revealed: TypedDictTop
+    sink(reversed(value))
+    sink(reversed(value.keys()))
+    sink(reversed(value.items()))
+    sink(reversed(value.values()))
 
 def takes_typed_dict_top_alias(value: Alias):
     reveal_type(value)  # revealed: TypedDictTop
@@ -770,10 +775,14 @@ def _(info: ErrorInfo):
 But plain-dict mutation APIs should still be rejected when the narrowed value may be a `TypedDict`:
 
 ```py
+def sink(x: object) -> None: ...
 def takes_dict(value: dict[str, object]) -> None: ...
 def mutate_dict_like(value: object) -> None:
     if isinstance(value, dict):
         reveal_type(value)  # revealed: Top[dict[Unknown, Unknown]] | TypedDictTop
+        sink(reversed(value.keys()))
+        sink(reversed(value.items()))
+        sink(reversed(value.values()))
         # TODO: Report this more precisely as an unsound TypedDict mutation, rather than as a
         # missing attribute.
         value.popitem()  # error: [unresolved-attribute]
