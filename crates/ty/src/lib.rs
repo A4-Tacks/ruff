@@ -26,8 +26,9 @@ use salsa::Database;
 use ty_project::metadata::options::ProjectOptionsOverrides;
 use ty_project::metadata::settings::TerminalSettings;
 use ty_project::watch::ProjectWatcher;
-use ty_project::{CollectReporter, Db, suppress_all_diagnostics, watch};
+use ty_project::{CollectReporter, Db, watch};
 use ty_project::{ProjectDatabase, ProjectMetadata};
+use ty_python_semantic::suppress_all_diagnostics;
 use ty_server::run_server;
 use ty_static::EnvVars;
 
@@ -381,9 +382,12 @@ impl MainLoop {
                             }
                         }
                         MainLoopMode::AddIgnore => {
-                            if let Ok(result) =
-                                suppress_all_diagnostics(db, result, &self.cancellation_token)
-                            {
+                            if let Ok(result) = suppress_all_diagnostics(
+                                db,
+                                result,
+                                &self.cancellation_token,
+                                ty_project::ProjectDatabase::check_file,
+                            ) {
                                 self.write_diagnostics(db, &result.diagnostics)?;
 
                                 let terminal_settings = db.project().settings(db).terminal();

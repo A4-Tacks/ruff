@@ -1,3 +1,4 @@
+use crate::{is_unused_ignore_comment_lint, suppress_all};
 use ruff_db::cancellation::{Canceled, CancellationToken};
 use ruff_db::diagnostic::{DisplayDiagnosticConfig, DisplayDiagnostics};
 use ruff_db::parsed::parsed_module;
@@ -14,7 +15,6 @@ use rustc_hash::FxHashSet;
 use salsa::Setter as _;
 use std::collections::BTreeMap;
 use thiserror::Error;
-use ty_python_semantic::{is_unused_ignore_comment_lint, suppress_all};
 
 use crate::Db;
 
@@ -34,11 +34,16 @@ pub struct SuppressAllResult {
 ///
 /// ## Panics
 /// If the `db`'s system isn't [writable](WritableSystem).
-pub fn suppress_all_diagnostics(
-    db: &mut dyn Db,
+pub fn suppress_all_diagnostics<DB, F>(
+    db: &mut DB,
     mut diagnostics: Vec<Diagnostic>,
     cancellation_token: &CancellationToken,
-) -> Result<SuppressAllResult, Canceled> {
+    check_file: F,
+) -> Result<SuppressAllResult, Canceled>
+where
+    DB: Db,
+    F: Fn(&DB, File) -> Vec<Diagnostic>,
+{
     let system = WritableSystem::dyn_clone(
         db.system()
             .as_writable()
@@ -79,7 +84,6 @@ pub fn suppress_all_diagnostics(
     }
 
     let mut fixed_count = 0usize;
-    let project = db.project();
 
     // Try to suppress all lint-diagnostics in the given file.
     for (&file, file_diagnostics) in &mut by_file {
@@ -215,7 +219,7 @@ pub fn suppress_all_diagnostics(
         } else {
             // If there are any other file level diagnostics, call `check_file` to re-compute them
             // with updated ranges.
-            let diagnostics = project.check_file(db, file);
+            let diagnostics = check_file(&*db, file);
             *file_diagnostics = diagnostics;
         }
 
@@ -348,19 +352,20 @@ struct FixedCode {
 
 /// Guard that sets [`File::set_source_text_override`] and guarantees to restore the original source
 /// text unless the guard is explicitly defused.
-struct WithUpdatedSourceGuard<'db> {
-    db: &'db mut dyn Db,
+struct WithUpdatedSourceGuard<'db, DB>
+where
+    DB: Db,
+{
+    db: &'db mut DB,
     file: File,
     old_source: Option<SourceText>,
 }
 
-impl<'db> WithUpdatedSourceGuard<'db> {
-    fn new(
-        db: &'db mut dyn Db,
-        file: File,
-        old_source: &SourceText,
-        new_source: SourceText,
-    ) -> Self {
+impl<'db, DB> WithUpdatedSourceGuard<'db, DB>
+where
+    DB: Db,
+{
+    fn new(db: &'db mut DB, file: File, old_source: &SourceText, new_source: SourceText) -> Self {
         file.set_source_text_override(db).to(Some(new_source));
         Self {
             db,
@@ -373,12 +378,15 @@ impl<'db> WithUpdatedSourceGuard<'db> {
         self.old_source = None;
     }
 
-    fn db(&mut self) -> &mut dyn Db {
+    fn db(&mut self) -> &mut DB {
         self.db
     }
 }
 
-impl Drop for WithUpdatedSourceGuard<'_> {
+impl<DB> Drop for WithUpdatedSourceGuard<'_, DB>
+where
+    DB: Db,
+{
     fn drop(&mut self) {
         if let Some(old_source) = self.old_source.take() {
             // We don't set `source_text_override` to `None` here because setting the value
@@ -404,16 +412,15 @@ mod tests {
     use ruff_db::files::{File, system_path_to_file};
     use ruff_db::parsed::parsed_module;
     use ruff_db::source::source_text;
-    use ruff_db::system::{DbWithWritableSystem, SystemPath, SystemPathBuf};
+    use ruff_db::system::{SystemPath, SystemPathBuf};
     use ruff_python_ast::name::Name;
     use rustc_hash::FxHashMap;
-    use ty_python_semantic::UNUSED_IGNORE_COMMENT;
-    use ty_python_semantic::lint::Level;
 
-    use crate::db::tests::TestDb;
-    use crate::metadata::options::Rules;
-    use crate::metadata::value::RangedValue;
-    use crate::{Db, ProjectMetadata, suppress_all_diagnostics};
+    use super::suppress_all_diagnostics;
+    use crate::Db;
+    use crate::db::tests::{TestDb, TestDbBuilder};
+    use crate::suppression::check_suppressions;
+    use crate::types::check_types;
 
     #[test]
     fn simple_suppression() {
@@ -655,34 +662,47 @@ class B(A):
 
     #[track_caller]
     fn suppress_all_in(source: &str) -> String {
+        fn check_file(db: &dyn Db, file: File) -> Vec<Diagnostic> {
+            let mut diagnostics = Vec::new();
+
+            let parsed = parsed_module(db, file);
+            diagnostics.extend(
+                parsed
+                    .load(db)
+                    .errors()
+                    .iter()
+                    .map(|error| Diagnostic::invalid_syntax(file, &error.error, error)),
+            );
+
+            diagnostics.extend(check_types(db, file));
+            diagnostics
+        }
+
         use std::fmt::Write as _;
 
-        let mut metadata = ProjectMetadata::new(Name::new_static("test"), SystemPathBuf::from("."));
-        metadata.options.rules = Some(Rules::from_iter([(
-            RangedValue::cli(UNUSED_IGNORE_COMMENT.name.to_string()),
-            RangedValue::cli(Level::Warn),
-        )]));
-
-        let mut db = TestDb::new(metadata);
-        db.init_program().unwrap();
-
-        db.write_file(
-            "test.py",
-            ruff_python_trivia::textwrap::dedent(source).trim(),
-        )
-        .unwrap();
+        let mut db = TestDbBuilder::new()
+            .with_file(
+                "test.py",
+                ruff_python_trivia::textwrap::dedent(source).trim(),
+            )
+            .build()
+            .unwrap();
 
         let file = system_path_to_file(&db, "test.py").unwrap();
 
         let parsed_before = parsed_module(&db, file);
         let had_syntax_errors = parsed_before.load(&db).has_syntax_errors();
 
-        let diagnostics = db.project().check_file(&db, file);
+        let diagnostics = check_file(&db, file);
         let total_diagnostics = diagnostics.len();
         let cancellation_token_source = CancellationTokenSource::new();
-        let fixes =
-            suppress_all_diagnostics(&mut db, diagnostics, &cancellation_token_source.token())
-                .expect("operation never gets cancelled");
+        let fixes = suppress_all_diagnostics(
+            &mut db,
+            diagnostics,
+            &cancellation_token_source.token(),
+            |db, file| check_file(db, file),
+        )
+        .expect("operation never gets cancelled");
 
         assert_eq!(fixes.count, total_diagnostics - fixes.diagnostics.len());
 
@@ -693,7 +713,7 @@ class B(A):
         let parsed = parsed_module(&db, file);
         let parsed = parsed.load(&db);
 
-        let diagnostics_after_applying_fixes = db.project().check_file(&db, file);
+        let diagnostics_after_applying_fixes = check_file(&db, file);
 
         let mut output = String::new();
 
