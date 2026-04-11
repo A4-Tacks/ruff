@@ -2789,6 +2789,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             | Type::AlwaysFalsy
             | Type::TypeIs(_)
             | Type::TypeGuard(_)
+            | Type::TypedDictTop
             | Type::TypedDict(_)
             | Type::NewTypeInstance(_) => {
                 let delattr_dunder_call_result = object_ty.try_call_dunder_with_policy(

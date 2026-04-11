@@ -1,5 +1,4 @@
 use crate::Db;
-use crate::place::known_module_symbol;
 use crate::semantic_index::expression::Expression;
 use crate::semantic_index::place::{PlaceExpr, PlaceTable, PlaceTableBuilder, ScopedPlaceId};
 use crate::semantic_index::place_table;
@@ -33,8 +32,6 @@ use ruff_python_ast::{BoolOp, ExprBoolOp};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{SmallVec, smallvec, smallvec_inline};
 use std::collections::hash_map::Entry;
-use ty_module_resolver::KnownModule;
-
 /// A set of places that could possibly be narrowed by a predicate.
 ///
 /// This is a conservative upper bound - all places that actually get narrowed
@@ -159,13 +156,9 @@ impl ClassInfoConstraintFunction {
             ClassInfoConstraintFunction::IsInstance => {
                 let constraint = Type::instance(db, class.top_materialization(db));
                 if class_literal_matches_typed_dict_runtime_supertype(db, class) {
-                    let typed_dict_fallback = IntersectionBuilder::new(db)
-                        .add_positive(typed_dict_fallback_portion(db, subject_ty))
-                        .add_positive(Type::TypedDictTop)
-                        .build();
                     UnionBuilder::new(db)
                         .add(constraint)
-                        .add(typed_dict_fallback)
+                        .add(Type::TypedDictTop)
                         .build()
                 } else {
                     constraint
@@ -332,20 +325,24 @@ impl ClassInfoConstraintFunction {
 /// Returns `true` for classes that are runtime supertypes of all `TypedDict` instances
 /// (`dict` and `MutableMapping`), so that `isinstance()` narrowing can include a
 /// `TypedDictTop` arm alongside the ordinary top-materialized instance.
-///
-/// `Mapping` is intentionally excluded: `TypedDict` is already statically compatible with
-/// `Mapping[str, object]`, so the extra `TypedDictTop` arm would simplify away during
-/// intersection and is not needed.
 fn class_literal_matches_typed_dict_runtime_supertype<'db>(
     db: &'db dyn Db,
     class: ClassLiteral<'db>,
 ) -> bool {
-    let mutable_mapping = known_module_symbol(db, KnownModule::Typing, "MutableMapping")
-        .place
-        .ignore_possibly_undefined()
-        .and_then(Type::as_class_literal);
+    class.is_known(db, KnownClass::Dict) || class.is_known(db, KnownClass::MutableMapping)
+}
 
-    class.is_known(db, KnownClass::Dict) || mutable_mapping == Some(class)
+fn negate_classinfo_constraint<'db>(db: &'db dyn Db, constraint: Type<'db>) -> Type<'db> {
+    match constraint {
+        Type::Union(union) => union
+            .elements(db)
+            .iter()
+            .fold(IntersectionBuilder::new(db), |builder, element| {
+                builder.add_negative(*element)
+            })
+            .build(),
+        _ => constraint.negate(db),
+    }
 }
 
 #[derive(Hash, PartialEq, Debug, Eq, Clone, salsa::Update, get_size2::GetSize)]
@@ -381,56 +378,6 @@ impl<'db> Conjunctions<'db> {
             intersection = intersection.add_positive(conjunct);
         }
         intersection.build()
-    }
-}
-
-/// Return the portion of a subject type that should preserve the `TypedDictTop` fallback arm
-/// for dict-like `isinstance()` narrowing.
-///
-/// This keeps explicit `TypedDict` content and gradual/top-like sources such as `object`,
-/// `Any`/`Unknown`, and unconstrained type variables, while excluding ordinary structural
-/// types like `Mapping` that should not retain a `TypedDict` possibility.
-fn typed_dict_fallback_portion<'db>(db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
-    let ty = ty.resolve_type_alias(db);
-
-    match ty {
-        Type::Union(union) => union.map(db, |element| typed_dict_fallback_portion(db, *element)),
-        Type::Intersection(intersection)
-            if intersection
-                .positive(db)
-                .iter()
-                .all(|element| preserves_typed_dict_fallback(db, *element)) =>
-        {
-            ty
-        }
-        _ if preserves_typed_dict_fallback(db, ty) => ty,
-        _ => Type::Never,
-    }
-}
-
-/// Return `true` if this type should keep participating in the `TypedDictTop` fallback arm
-/// produced by dict-like `isinstance()` narrowing.
-///
-/// The intent is to preserve the fallback only for types where it still models a real
-/// possibility after narrowing, and to reject interface-only types like `Mapping` or
-/// `Iterable` that would otherwise create impossible `... & TypedDictTop` intersections.
-fn preserves_typed_dict_fallback<'db>(db: &'db dyn Db, ty: Type<'db>) -> bool {
-    match ty.resolve_type_alias(db) {
-        Type::Dynamic(_) | Type::Divergent(_) | Type::TypedDict(_) | Type::TypedDictTop => true,
-        Type::NominalInstance(instance) => instance.is_object(),
-        Type::TypeVar(bound_typevar) => bound_typevar
-            .typevar(db)
-            .bound_or_constraints(db)
-            .is_none_or(|bound_or_constraints| match bound_or_constraints {
-                TypeVarBoundOrConstraints::UpperBound(bound) => {
-                    preserves_typed_dict_fallback(db, bound)
-                }
-                TypeVarBoundOrConstraints::Constraints(constraints) => constraints
-                    .elements(db)
-                    .iter()
-                    .any(|constraint| preserves_typed_dict_fallback(db, *constraint)),
-            }),
-        _ => false,
     }
 }
 
@@ -1690,9 +1637,11 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
                     .map(|classinfo| {
                         NarrowingConstraints::from_iter([(
                             place,
-                            NarrowingConstraint::classinfo(
-                                classinfo.negate_if(self.db, !is_positive),
-                            ),
+                            NarrowingConstraint::classinfo(if is_positive {
+                                classinfo
+                            } else {
+                                negate_classinfo_constraint(self.db, classinfo)
+                            }),
                         )])
                     })
             }
@@ -1816,14 +1765,17 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
         let subject = PlaceExpr::try_from_expr(subject.node_ref(self.db).node(self.module))?;
         let place = self.expect_place(&subject);
 
-        let mapping_type = ClassInfoConstraintFunction::IsInstance
-            .generate_constraint(
-                self.db,
-                Type::object(),
-                KnownClass::Mapping.to_class_literal(self.db),
-                is_positive,
-            )?
-            .negate_if(self.db, !is_positive);
+        let mapping_type = ClassInfoConstraintFunction::IsInstance.generate_constraint(
+            self.db,
+            Type::object(),
+            KnownClass::Mapping.to_class_literal(self.db),
+            is_positive,
+        )?;
+        let mapping_type = if is_positive {
+            mapping_type
+        } else {
+            negate_classinfo_constraint(self.db, mapping_type)
+        };
 
         Some(NarrowingConstraints::from_iter([(
             place,
