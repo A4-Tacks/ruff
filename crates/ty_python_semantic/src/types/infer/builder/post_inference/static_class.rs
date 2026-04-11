@@ -22,7 +22,7 @@ use crate::{
         SpecialFormType, StaticClassLiteral, Type,
         call::{Argument, CallError},
         class::{AbstractMethod, CodeGeneratorKind, FieldKind, MetaclassErrorKind},
-        context::InferContext,
+        context::{ClassStatementHint, InferContext},
         definition_expression_type,
         diagnostic::{
             ABSTRACT_METHOD_IN_FINAL_CLASS, CONFLICTING_METACLASS, CYCLIC_CLASS_DEFINITION,
@@ -1288,6 +1288,7 @@ fn check_non_typeddict_keyword_arguments<'db>(
         let str = KnownClass::Str.to_instance(db);
         let bases_type = Type::homogeneous_tuple(db, KnownClass::Type.to_instance(db));
 
+        context.attach_class_statement_hint(ClassStatementHint::MetaclassPrepare);
         let namespace_type = metaclass
             .member_lookup_with_policy(
                 db,
@@ -1307,18 +1308,23 @@ fn check_non_typeddict_keyword_arguments<'db>(
                     .return_type(db)
             })
             .unwrap_or_else(|| KnownClass::Dict.to_specialized_instance(db, &[str, Type::any()]));
+        context.clear_class_statement_hint();
 
         let metaclass_new_prepended_parameters = &[str, bases_type, namespace_type];
 
         let metaclass_new_args =
             keyword_call_args.with_prepended_parameters(metaclass_new_prepended_parameters);
 
+        context.attach_class_statement_hint(ClassStatementHint::MetaclassConstructor);
         if let Err(CallError(_, bindings)) = metaclass.try_call(db, &metaclass_new_args) {
             bindings.report_diagnostics(context, class_node.into());
         }
+        context.clear_class_statement_hint();
     }
 
     if check_init_subclass {
+        context.attach_class_statement_hint(ClassStatementHint::InitSubclass);
+
         let init_subclass = class.class_member_from_mro(
             db,
             "__init_subclass__",
@@ -1335,5 +1341,7 @@ fn check_non_typeddict_keyword_arguments<'db>(
                 bindings.report_diagnostics(context, class_node.into());
             }
         }
+
+        context.clear_class_statement_hint();
     }
 }

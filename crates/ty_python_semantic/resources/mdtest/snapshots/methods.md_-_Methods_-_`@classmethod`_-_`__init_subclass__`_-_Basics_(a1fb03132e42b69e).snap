@@ -110,6 +110,8 @@ info: Parameter declared here
 14 |
 15 | class NoArg:
    |
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
 
@@ -132,6 +134,8 @@ info: Function defined here
 14 |
 15 | class NoArg:
    |
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
 
@@ -155,6 +159,8 @@ info: Parameter declared here
 14 |
 15 | class NoArg:
    |
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
 
@@ -178,6 +184,8 @@ info: Function signature here
 14 |
 15 | class NoArg:
    |
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
 
@@ -194,6 +202,8 @@ error[call-non-callable]: Object of type `None` is not callable
    |
 info: Union variant `None` is incompatible with this call site
 info: Attempted to call union type `None | Unknown`
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
 
@@ -216,6 +226,8 @@ info: Function defined here
 51 |
 52 | class Valid(Base, arg=5, metaclass=object): ...
    |
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
 
@@ -252,5 +264,7 @@ info: Overload implementation defined here
 64 |
 65 | class Valid(Base, mode="a", arg=5): ...
    |
+info: `__init_subclass__` on a superclass is implicitly called during creation of a class object
+info: See https://docs.python.org/3/reference/datamodel.html#customizing-class-creation
 
 ```
