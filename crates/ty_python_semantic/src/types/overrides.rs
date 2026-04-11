@@ -57,11 +57,9 @@ const PROHIBITED_NAMEDTUPLE_ATTRS: &[&str] = &[
     "_source",
 ];
 
-/// Checks a class body for invalid override-related behavior.
-///
-/// TODO: Support dynamic class literals. If we allow dynamic classes to define attributes in their
-/// namespace dictionary, we should also check whether those attributes are valid overrides of
-/// attributes in their superclasses.
+// TODO: Support dynamic class literals. If we allow dynamic classes to define attributes in their
+// namespace dictionary, we should also check whether those attributes are valid overrides of
+// attributes in their superclasses.
 pub(super) fn check_class<'db>(context: &InferContext<'db, '_>, class: StaticClassLiteral<'db>) {
     let db = context.db();
     let configuration = OverrideRulesConfig::from(context);
@@ -175,7 +173,6 @@ fn class_body_first_end_of_scope_definition<'db>(
         })
 }
 
-/// Checks override-related rules for a single class member definition.
 fn check_class_declaration<'db>(
     context: &InferContext<'db, '_>,
     configuration: OverrideRulesConfig,
@@ -707,8 +704,6 @@ impl OverrideRulesConfig {
         self.contains(OverrideRulesConfig::FINAL_METHOD_OVERRIDDEN)
     }
 
-    /// Returns whether inherited `NamedTuple` field conflicts should be
-    /// diagnosed.
     const fn check_invalid_named_tuple_overrides(self) -> bool {
         self.contains(OverrideRulesConfig::INVALID_NAMED_TUPLE_OVERRIDE)
     }
