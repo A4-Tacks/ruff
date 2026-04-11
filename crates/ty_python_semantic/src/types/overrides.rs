@@ -12,7 +12,7 @@ use rustc_hash::FxHashSet;
 use crate::{
     Db,
     lint::LintId,
-    place::{DefinedPlace, Place},
+    place::{DefinedPlace, Place, place_from_bindings, place_from_declarations},
     semantic_index::{
         definition::{Definition, DefinitionKind},
         place::ScopedPlaceId,
@@ -57,11 +57,9 @@ const PROHIBITED_NAMEDTUPLE_ATTRS: &[&str] = &[
     "_source",
 ];
 
-/// Checks a class body for invalid override-related behavior.
-///
-/// TODO: Support dynamic class literals. If we allow dynamic classes to define attributes in their
-/// namespace dictionary, we should also check whether those attributes are valid overrides of
-/// attributes in their superclasses.
+// TODO: Support dynamic class literals. If we allow dynamic classes to define attributes in their
+// namespace dictionary, we should also check whether those attributes are valid overrides of
+// attributes in their superclasses.
 pub(super) fn check_class<'db>(context: &InferContext<'db, '_>, class: StaticClassLiteral<'db>) {
     let db = context.db();
     let configuration = OverrideRulesConfig::from(context);
@@ -152,30 +150,14 @@ fn class_body_first_end_of_scope_definition<'db>(
 ) -> Option<Definition<'db>> {
     let symbol_id = place_table(db, class_scope).symbol_id(field_name.as_str())?;
     let use_def = use_def_map(db, class_scope);
-    let mut declarations = use_def.end_of_scope_symbol_declarations(symbol_id);
-    let predicates = declarations.predicates;
-    let reachability_constraints = declarations.reachability_constraints;
-
-    if let Some(definition) = declarations.find_map(|declaration| {
-        (!reachability_constraints
-            .evaluate(db, predicates, declaration.reachability_constraint)
-            .is_always_false())
-        .then(|| declaration.declaration.definition())
-        .flatten()
-    }) {
-        return Some(definition);
-    }
-
-    use_def
-        .end_of_scope_symbol_bindings(symbol_id)
-        .find_map(|binding| {
-            (!use_def.binding_reachability(db, &binding).is_always_false())
-                .then(|| binding.binding.definition())
-                .flatten()
+    place_from_declarations(db, use_def.end_of_scope_symbol_declarations(symbol_id))
+        .first_declaration
+        .or_else(|| {
+            place_from_bindings(db, use_def.end_of_scope_symbol_bindings(symbol_id))
+                .first_definition
         })
 }
 
-/// Checks override-related rules for a single class member definition.
 fn check_class_declaration<'db>(
     context: &InferContext<'db, '_>,
     configuration: OverrideRulesConfig,
@@ -707,8 +689,6 @@ impl OverrideRulesConfig {
         self.contains(OverrideRulesConfig::FINAL_METHOD_OVERRIDDEN)
     }
 
-    /// Returns whether inherited `NamedTuple` field conflicts should be
-    /// diagnosed.
     const fn check_invalid_named_tuple_overrides(self) -> bool {
         self.contains(OverrideRulesConfig::INVALID_NAMED_TUPLE_OVERRIDE)
     }
