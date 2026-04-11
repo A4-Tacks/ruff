@@ -1120,6 +1120,23 @@ class ShadowedChild(ShadowingMid):
     name: int
 ```
 
+Statically unreachable declarations should not count as the overriding declaration when a later
+declaration is the one that remains visible at end-of-scope:
+
+```py
+from typing import NamedTuple
+
+class ReachabilityBase(NamedTuple):
+    field: int
+
+class ReachabilityChild(ReachabilityBase):
+    if False:
+        field: int
+    else:
+        # error: [invalid-named-tuple] "Cannot override NamedTuple field `field` inherited from `ReachabilityBase`"
+        field: str
+```
+
 ### Generic named tuples
 
 ```toml
