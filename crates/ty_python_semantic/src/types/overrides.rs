@@ -7,6 +7,7 @@ use bitflags::bitflags;
 use ruff_db::diagnostic::Annotation;
 use ruff_python_ast::name::Name;
 use ruff_python_stdlib::identifiers::is_mangled_private;
+use ruff_text_size::TextRange;
 use rustc_hash::FxHashSet;
 
 use crate::{
@@ -25,14 +26,16 @@ use crate::{
         CallableType, ClassBase, ClassLiteral, ClassType, KnownClass, Parameter, Parameters,
         Signature, StaticClassLiteral, Type, TypeContext, TypeQualifiers,
         call::CallArguments,
-        class::{CodeGeneratorKind, FieldKind},
+        class::{CodeGeneratorKind, DynamicClassLiteral, FieldKind},
         constraints::ConstraintSetBuilder,
         context::InferContext,
         diagnostic::{
             INVALID_ASSIGNMENT, INVALID_DATACLASS, INVALID_EXPLICIT_OVERRIDE,
             INVALID_METHOD_OVERRIDE, INVALID_NAMED_TUPLE, OVERRIDE_OF_FINAL_METHOD,
             OVERRIDE_OF_FINAL_VARIABLE, report_invalid_method_override,
-            report_overridden_final_method, report_overridden_final_variable,
+            report_invalid_method_override_at_range, report_overridden_final_method,
+            report_overridden_final_method_at_range, report_overridden_final_variable,
+            report_overridden_final_variable_at_range,
         },
         enums::{EnumMetadata, enum_metadata},
         function::{FunctionDecorators, FunctionType, KnownFunction},
@@ -57,9 +60,6 @@ const PROHIBITED_NAMEDTUPLE_ATTRS: &[&str] = &[
     "_source",
 ];
 
-// TODO: Support dynamic class literals. If we allow dynamic classes to define attributes in their
-// namespace dictionary, we should also check whether those attributes are valid overrides of
-// attributes in their superclasses.
 pub(super) fn check_class<'db>(context: &InferContext<'db, '_>, class: StaticClassLiteral<'db>) {
     let db = context.db();
     let configuration = OverrideRulesConfig::from(context);
@@ -80,6 +80,37 @@ pub(super) fn check_class<'db>(context: &InferContext<'db, '_>, class: StaticCla
             class_specialized,
             scope,
             &member,
+        );
+    }
+}
+
+pub(super) fn check_dynamic_class<'db>(
+    context: &InferContext<'db, '_>,
+    class: DynamicClassLiteral<'db>,
+) {
+    let db = context.db();
+    let configuration = OverrideRulesConfig::from(context);
+    if configuration.no_rules_enabled() {
+        return;
+    }
+
+    let class_specialized = ClassLiteral::Dynamic(class).identity_specialization(db);
+    let class_kind = CodeGeneratorKind::from_class(db, class.into(), None);
+
+    for dynamic_member in class.members(db) {
+        let member = Member {
+            name: dynamic_member.name.clone(),
+            ty: dynamic_member.ty,
+        };
+        check_member_override_rules(
+            context,
+            configuration,
+            class_kind,
+            class_specialized,
+            &member,
+            MemberOrigin::Dynamic {
+                range: dynamic_member.range,
+            },
         );
     }
 }
@@ -129,7 +160,7 @@ fn conflicting_named_tuple_field_in_mro<'db>(
             ClassLiteral::Dynamic(class_literal) => class_literal
                 .members(db)
                 .iter()
-                .any(|(member_name, _)| member_name == field_name),
+                .any(|member| &member.name == field_name),
             ClassLiteral::DynamicNamedTuple(_) | ClassLiteral::DynamicTypedDict(_) => false,
         };
 
@@ -181,41 +212,6 @@ fn check_class_declaration<'db>(
     class_scope: ScopeId<'db>,
     member: &MemberWithDefinition<'db>,
 ) {
-    /// Salsa-tracked query to check whether any of the definitions of a symbol
-    /// in a superclass scope are function definitions.
-    ///
-    /// We need to know this for compatibility with pyright and mypy, neither of which emit an error
-    /// on `C.f` here:
-    ///
-    /// ```python
-    /// from typing import final
-    ///
-    /// class A:
-    ///     @final
-    ///     def f(self) -> None: ...
-    ///
-    /// class B:
-    ///     f = A.f
-    ///
-    /// class C(B):
-    ///     def f(self) -> None: ...  # no error here
-    /// ```
-    ///
-    /// This is a Salsa-tracked query because it has to look at the AST node for the definition,
-    /// which might be in a different Python module. If this weren't a tracked query, we could
-    /// introduce cross-module dependencies and over-invalidation.
-    #[salsa::tracked(heap_size=ruff_memory_usage::heap_size)]
-    fn is_function_definition<'db>(
-        db: &'db dyn Db,
-        scope: ScopeId<'db>,
-        symbol: ScopedSymbolId,
-    ) -> bool {
-        use_def_map(db, scope)
-            .end_of_scope_symbol_bindings(symbol)
-            .filter_map(|binding| binding.binding.definition())
-            .any(|definition| definition.kind(db).is_function_def())
-    }
-
     let db = context.db();
 
     let MemberWithDefinition {
@@ -224,14 +220,6 @@ fn check_class_declaration<'db>(
     } = member;
 
     let instance_of_class = Type::instance(db, class);
-
-    let Place::Defined(DefinedPlace {
-        ty: type_on_subclass_instance,
-        ..
-    }) = instance_of_class.member(db, &member.name).place
-    else {
-        return;
-    };
 
     let Some((literal, specialization)) = class.static_class_literal(db) else {
         return;
@@ -367,6 +355,181 @@ fn check_class_declaration<'db>(
             }
         }
     }
+
+    check_member_override_rules(
+        context,
+        configuration,
+        class_kind,
+        class,
+        member,
+        MemberOrigin::Static {
+            first_reachable_definition: *first_reachable_definition,
+        },
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum MethodKind<'db> {
+    Synthesized(CodeGeneratorKind<'db>),
+    #[default]
+    NotSynthesized,
+}
+
+bitflags! {
+    /// Bitflags representing which override-related rules have been enabled.
+    #[derive(Default, Debug, Copy, Clone)]
+    struct OverrideRulesConfig: u8 {
+        const LISKOV_METHODS = 1 << 0;
+        const EXPLICIT_OVERRIDE = 1 << 1;
+        const FINAL_METHOD_OVERRIDDEN = 1 << 2;
+        const INVALID_NAMED_TUPLE_OVERRIDE = 1 << 3;
+        const INVALID_DATACLASS = 1 << 4;
+        const FINAL_VARIABLE_OVERRIDDEN = 1 << 5;
+        const INVALID_ENUM_VALUE = 1 << 6;
+    }
+}
+
+impl From<&InferContext<'_, '_>> for OverrideRulesConfig {
+    fn from(value: &InferContext<'_, '_>) -> Self {
+        let db = value.db();
+        let rule_selection = db.rule_selection(value.file());
+
+        let mut config = OverrideRulesConfig::empty();
+
+        if rule_selection.is_enabled(LintId::of(&INVALID_METHOD_OVERRIDE)) {
+            config |= OverrideRulesConfig::LISKOV_METHODS;
+        }
+        if rule_selection.is_enabled(LintId::of(&INVALID_EXPLICIT_OVERRIDE)) {
+            config |= OverrideRulesConfig::EXPLICIT_OVERRIDE;
+        }
+        if rule_selection.is_enabled(LintId::of(&OVERRIDE_OF_FINAL_METHOD)) {
+            config |= OverrideRulesConfig::FINAL_METHOD_OVERRIDDEN;
+        }
+        if rule_selection.is_enabled(LintId::of(&INVALID_NAMED_TUPLE)) {
+            config |= OverrideRulesConfig::INVALID_NAMED_TUPLE_OVERRIDE;
+        }
+        if rule_selection.is_enabled(LintId::of(&INVALID_DATACLASS)) {
+            config |= OverrideRulesConfig::INVALID_DATACLASS;
+        }
+        if rule_selection.is_enabled(LintId::of(&OVERRIDE_OF_FINAL_VARIABLE)) {
+            config |= OverrideRulesConfig::FINAL_VARIABLE_OVERRIDDEN;
+        }
+        if rule_selection.is_enabled(LintId::of(&INVALID_ASSIGNMENT)) {
+            config |= OverrideRulesConfig::INVALID_ENUM_VALUE;
+        }
+
+        config
+    }
+}
+
+impl OverrideRulesConfig {
+    const fn no_rules_enabled(self) -> bool {
+        self.is_empty()
+    }
+
+    const fn check_method_liskov_violations(self) -> bool {
+        self.contains(OverrideRulesConfig::LISKOV_METHODS)
+    }
+
+    const fn check_final_method_overridden(self) -> bool {
+        self.contains(OverrideRulesConfig::FINAL_METHOD_OVERRIDDEN)
+    }
+
+    const fn check_invalid_named_tuple_overrides(self) -> bool {
+        self.contains(OverrideRulesConfig::INVALID_NAMED_TUPLE_OVERRIDE)
+    }
+
+    const fn check_invalid_dataclasses(self) -> bool {
+        self.contains(OverrideRulesConfig::INVALID_DATACLASS)
+    }
+
+    const fn check_final_variable_overridden(self) -> bool {
+        self.contains(OverrideRulesConfig::FINAL_VARIABLE_OVERRIDDEN)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MemberOrigin<'db> {
+    Static {
+        first_reachable_definition: Definition<'db>,
+    },
+    Dynamic {
+        range: TextRange,
+    },
+}
+
+impl MemberOrigin<'_> {
+    fn is_function_definition(self, db: &dyn Db) -> bool {
+        match self {
+            Self::Static {
+                first_reachable_definition,
+            } => first_reachable_definition.kind(db).is_function_def(),
+            Self::Dynamic { .. } => false,
+        }
+    }
+}
+
+fn check_member_override_rules<'db>(
+    context: &InferContext<'db, '_>,
+    configuration: OverrideRulesConfig,
+    class_kind: Option<CodeGeneratorKind<'db>>,
+    class: ClassType<'db>,
+    member: &Member<'db>,
+    origin: MemberOrigin<'db>,
+) {
+    /// Salsa-tracked query to check whether any of the definitions of a symbol
+    /// in a superclass scope are function definitions.
+    ///
+    /// We need to know this for compatibility with pyright and mypy, neither of which emit an error
+    /// on `C.f` here:
+    ///
+    /// ```python
+    /// from typing import final
+    ///
+    /// class A:
+    ///     @final
+    ///     def f(self) -> None: ...
+    ///
+    /// class B:
+    ///     f = A.f
+    ///
+    /// class C(B):
+    ///     def f(self) -> None: ...  # no error here
+    /// ```
+    ///
+    /// This is a Salsa-tracked query because it has to look at the AST node for the definition,
+    /// which might be in a different Python module. If this weren't a tracked query, we could
+    /// introduce cross-module dependencies and over-invalidation.
+    #[salsa::tracked(heap_size=ruff_memory_usage::heap_size)]
+    fn is_function_definition<'db>(
+        db: &'db dyn Db,
+        scope: ScopeId<'db>,
+        symbol: ScopedSymbolId,
+    ) -> bool {
+        use_def_map(db, scope)
+            .end_of_scope_symbol_bindings(symbol)
+            .filter_map(|binding| binding.binding.definition())
+            .any(|definition| definition.kind(db).is_function_def())
+    }
+
+    let db = context.db();
+
+    let instance_of_class = Type::instance(db, class);
+    let type_on_subclass_instance = match (class.class_literal(db), member.ty) {
+        (ClassLiteral::Dynamic(_), Type::FunctionLiteral(function)) => {
+            Type::BoundMethod(function.into_bound_method_type(db, instance_of_class))
+        }
+        _ => {
+            let Place::Defined(DefinedPlace {
+                ty: type_on_subclass_instance,
+                ..
+            }) = instance_of_class.member(db, &member.name).place
+            else {
+                return;
+            };
+            type_on_subclass_instance
+        }
+    };
 
     let mut subclass_overrides_superclass_declaration = false;
     let mut has_dynamic_superclass = false;
@@ -554,29 +717,41 @@ fn check_class_declaration<'db>(
             // If so, don't report the same violation for the child class -- it would be a false positive
             // since the child cannot fix the violation without contradicting its immediate parent's contract.
             // See: https://github.com/astral-sh/ty/issues/2000
-            if let Some((immediate_parent, immediate_parent_type)) = immediate_parent_method {
-                if immediate_parent != superclass {
-                    // The immediate parent already defines this method and is different from the
-                    // current ancestor we're checking. Check if the immediate parent's method
-                    // is also incompatible with this ancestor.
-                    if !immediate_parent_type.is_assignable_to(db, superclass_type_as_type) {
-                        // The immediate parent already has an LSP violation with this ancestor.
-                        // Don't report the same violation for the child.
-                        continue;
-                    }
-                }
+            if let Some((immediate_parent, immediate_parent_type)) = immediate_parent_method
+                && immediate_parent != superclass
+                // The immediate parent already defines this method and is different from the
+                // current ancestor we're checking. Check if the immediate parent's method
+                // is also incompatible with this ancestor.
+                && !immediate_parent_type.is_assignable_to(db, superclass_type_as_type)
+            {
+                // The immediate parent already has an LSP violation with this ancestor.
+                // Don't report the same violation for the child.
+                continue;
             }
 
-            report_invalid_method_override(
-                context,
-                &member.name,
-                class,
-                *first_reachable_definition,
-                subclass_function,
-                superclass,
-                superclass_type,
-                method_kind,
-            );
+            match origin {
+                MemberOrigin::Static {
+                    first_reachable_definition,
+                } => report_invalid_method_override(
+                    context,
+                    &member.name,
+                    class,
+                    first_reachable_definition,
+                    subclass_function,
+                    superclass,
+                    superclass_type,
+                    method_kind,
+                ),
+                MemberOrigin::Dynamic { range } => report_invalid_method_override_at_range(
+                    context,
+                    &member.name,
+                    class,
+                    range,
+                    superclass,
+                    superclass_type,
+                    method_kind,
+                ),
+            }
 
             liskov_diagnostic_emitted = true;
         }
@@ -606,114 +781,56 @@ fn check_class_declaration<'db>(
 
     if !subclass_overrides_superclass_declaration
         && !has_dynamic_superclass
-        // accessing `.kind()` here is fine as `definition`
-        // will always be a definition in the file currently being checked
-        && first_reachable_definition.kind(db).is_function_def()
+        && origin.is_function_definition(db)
     {
         check_explicit_overrides(context, member, class);
     }
 
     if let Some((superclass, superclass_method)) = overridden_final_method {
-        report_overridden_final_method(
-            context,
-            &member.name,
-            *first_reachable_definition,
-            member.ty,
-            superclass,
-            class,
-            &superclass_method,
-        );
+        match origin {
+            MemberOrigin::Static {
+                first_reachable_definition,
+            } => report_overridden_final_method(
+                context,
+                &member.name,
+                first_reachable_definition,
+                member.ty,
+                superclass,
+                class,
+                &superclass_method,
+            ),
+            MemberOrigin::Dynamic { range } => report_overridden_final_method_at_range(
+                context,
+                &member.name,
+                range,
+                superclass,
+                class,
+                &superclass_method,
+            ),
+        }
     }
 
     if let Some((superclass, superclass_definition)) = overridden_final_variable {
-        report_overridden_final_variable(
-            context,
-            &member.name,
-            *first_reachable_definition,
-            superclass,
-            class,
-            superclass_definition,
-        );
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum MethodKind<'db> {
-    Synthesized(CodeGeneratorKind<'db>),
-    #[default]
-    NotSynthesized,
-}
-
-bitflags! {
-    /// Bitflags representing which override-related rules have been enabled.
-    #[derive(Default, Debug, Copy, Clone)]
-    struct OverrideRulesConfig: u8 {
-        const LISKOV_METHODS = 1 << 0;
-        const EXPLICIT_OVERRIDE = 1 << 1;
-        const FINAL_METHOD_OVERRIDDEN = 1 << 2;
-        const INVALID_NAMED_TUPLE_OVERRIDE = 1 << 3;
-        const INVALID_DATACLASS = 1 << 4;
-        const FINAL_VARIABLE_OVERRIDDEN = 1 << 5;
-        const INVALID_ENUM_VALUE = 1 << 6;
-    }
-}
-
-impl From<&InferContext<'_, '_>> for OverrideRulesConfig {
-    fn from(value: &InferContext<'_, '_>) -> Self {
-        let db = value.db();
-        let rule_selection = db.rule_selection(value.file());
-
-        let mut config = OverrideRulesConfig::empty();
-
-        if rule_selection.is_enabled(LintId::of(&INVALID_METHOD_OVERRIDE)) {
-            config |= OverrideRulesConfig::LISKOV_METHODS;
+        match origin {
+            MemberOrigin::Static {
+                first_reachable_definition,
+            } => report_overridden_final_variable(
+                context,
+                &member.name,
+                first_reachable_definition,
+                superclass,
+                class,
+                superclass_definition,
+            ),
+            MemberOrigin::Dynamic { range } => report_overridden_final_variable_at_range(
+                context,
+                &member.name,
+                range,
+                superclass,
+                class,
+                superclass_definition,
+            ),
         }
-        if rule_selection.is_enabled(LintId::of(&INVALID_EXPLICIT_OVERRIDE)) {
-            config |= OverrideRulesConfig::EXPLICIT_OVERRIDE;
-        }
-        if rule_selection.is_enabled(LintId::of(&OVERRIDE_OF_FINAL_METHOD)) {
-            config |= OverrideRulesConfig::FINAL_METHOD_OVERRIDDEN;
-        }
-        if rule_selection.is_enabled(LintId::of(&INVALID_NAMED_TUPLE)) {
-            config |= OverrideRulesConfig::INVALID_NAMED_TUPLE_OVERRIDE;
-        }
-        if rule_selection.is_enabled(LintId::of(&INVALID_DATACLASS)) {
-            config |= OverrideRulesConfig::INVALID_DATACLASS;
-        }
-        if rule_selection.is_enabled(LintId::of(&OVERRIDE_OF_FINAL_VARIABLE)) {
-            config |= OverrideRulesConfig::FINAL_VARIABLE_OVERRIDDEN;
-        }
-        if rule_selection.is_enabled(LintId::of(&INVALID_ASSIGNMENT)) {
-            config |= OverrideRulesConfig::INVALID_ENUM_VALUE;
-        }
-
-        config
-    }
-}
-
-impl OverrideRulesConfig {
-    const fn no_rules_enabled(self) -> bool {
-        self.is_empty()
-    }
-
-    const fn check_method_liskov_violations(self) -> bool {
-        self.contains(OverrideRulesConfig::LISKOV_METHODS)
-    }
-
-    const fn check_final_method_overridden(self) -> bool {
-        self.contains(OverrideRulesConfig::FINAL_METHOD_OVERRIDDEN)
-    }
-
-    const fn check_invalid_named_tuple_overrides(self) -> bool {
-        self.contains(OverrideRulesConfig::INVALID_NAMED_TUPLE_OVERRIDE)
-    }
-
-    const fn check_invalid_dataclasses(self) -> bool {
-        self.contains(OverrideRulesConfig::INVALID_DATACLASS)
-    }
-
-    const fn check_final_variable_overridden(self) -> bool {
-        self.contains(OverrideRulesConfig::FINAL_VARIABLE_OVERRIDDEN)
     }
 }
 

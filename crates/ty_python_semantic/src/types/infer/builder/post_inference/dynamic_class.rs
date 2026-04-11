@@ -9,6 +9,7 @@ use crate::{
             report_instance_layout_conflict,
         },
         infer::builder::dynamic_class::report_dynamic_mro_errors,
+        overrides,
     },
 };
 
@@ -91,4 +92,6 @@ pub(crate) fn check_dynamic_class_definition<'db>(
             base2.display(db),
         );
     }
+
+    overrides::check_dynamic_class(context, dynamic_class);
 }

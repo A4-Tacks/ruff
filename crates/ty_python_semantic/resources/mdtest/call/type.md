@@ -738,6 +738,27 @@ NoSlots = type("NoSlots", (), {})
 StringSlots = type("StringSlots", (), {"__slots__": "x"})
 ```
 
+Dynamic class members defined in the namespace dictionary are also checked as overrides of
+superclass members:
+
+```py
+from typing import Final, final
+
+class Base:
+    value: Final[int] = 1
+
+    @final
+    def final_method(self) -> None: ...
+    def method(self, x: int) -> None: ...
+
+def bad(self, x: str) -> None: ...
+def final_override(self) -> None: ...
+
+Dyn1 = type("Dyn1", (Base,), {"method": bad})  # error: [invalid-method-override]
+Dyn2 = type("Dyn2", (Base,), {"final_method": final_override})  # error: [override-of-final-method]
+Dyn3 = type("Dyn3", (Base,), {"value": 2})  # error: [override-of-final-variable]
+```
+
 Dynamic classes with non-empty `__slots__` cannot coexist with other disjoint bases:
 
 ```py

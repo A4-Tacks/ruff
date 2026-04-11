@@ -1,6 +1,7 @@
 use crate::semantic_index::definition::Definition;
 use crate::types::class::{
-    ClassLiteral, DynamicClassAnchor, DynamicClassLiteral, DynamicMetaclassConflict,
+    ClassLiteral, DynamicClassAnchor, DynamicClassLiteral, DynamicClassMember,
+    DynamicMetaclassConflict,
 };
 use crate::types::diagnostic::{
     INVALID_ARGUMENT_TYPE, NO_MATCHING_OVERLOAD, report_conflicting_metaclass_from_bases,
@@ -13,6 +14,7 @@ use crate::types::infer::builder::{
 use crate::types::{KnownClass, SubclassOfType, Type, TypeContext, definition_expression_type};
 use ruff_python_ast::name::Name;
 use ruff_python_ast::{self as ast, HasNodeIndex, NodeIndex};
+use ruff_text_size::Ranged;
 
 impl<'db> TypeInferenceBuilder<'db, '_> {
     /// Infer a call to `builtins.type()`.
@@ -133,7 +135,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         }
 
         // Extract members from the namespace dict (third argument).
-        let (members, has_dynamic_namespace): (Box<[(ast::name::Name, Type<'db>)]>, bool) =
+        let (members, has_dynamic_namespace): (Box<[DynamicClassMember<'db>]>, bool) =
             if let ast::Expr::Dict(dict) = namespace_arg {
                 // Check if all keys are string literal types. If any key is not a string literal
                 // type or is missing (spread), the namespace is considered dynamic.
@@ -152,7 +154,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         let key_name = ast::name::Name::new(key_name.value(db));
                         // Get the already-inferred type from when we inferred the dict above.
                         let value_ty = self.expression_type(&item.value);
-                        Some((key_name, value_ty))
+                        Some(DynamicClassMember {
+                            name: key_name,
+                            ty: value_ty,
+                            range: item.value.range(),
+                        })
                     })
                     .collect();
                 (members, !all_keys_are_string_literals)
@@ -160,10 +166,14 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 // `namespace` is a TypedDict instance. Extract known keys as members.
                 // TypedDicts are "open" (can have additional string keys), so this
                 // is still a dynamic namespace for unknown attributes.
-                let members: Box<[(ast::name::Name, Type<'db>)]> = typed_dict
+                let members: Box<[DynamicClassMember<'db>]> = typed_dict
                     .items(db)
                     .iter()
-                    .map(|(name, field)| (name.clone(), field.declared_ty))
+                    .map(|(name, field)| DynamicClassMember {
+                        name: name.clone(),
+                        ty: field.declared_ty,
+                        range: namespace_arg.range(),
+                    })
                     .collect();
                 (members, true)
             } else {
